@@ -17,6 +17,15 @@ neo4j-data/
 # --- Raw DrugCentral PostgreSQL dump (4.7 GB); the pipeline only reads the TSVs in data/drugcentral/
 data/drugcentral/raw/
 
+# --- Raw bulk downloads (openFDA labels ~1.8 GB, TWOSIDES ~740 MB, CDSCO PDFs, 250k Indian medicines ~90 MB);
+#     only the filtered extracts next to them are committed. Rebuild them with src/extract_sources.py
+data/fda/raw/
+data/twosides/raw/
+data/cdsco/raw/
+data/india/raw/
+# AGS Beers Criteria 2023 article: copyrighted, used only to curate data/beers/beers_2023.csv
+data/beers/raw/
+
 # --- Editor, OS and tool caches
 .DS_Store
 .vscode/

@@ -8,12 +8,17 @@ sources ends up as a single Drug node:
 Run:  python src/prepare_data.py
 """
 import csv
+import difflib
 import glob
 import gzip
+import itertools
+import json
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+from curated import LABEL_CLASS_TERMS
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -180,6 +185,168 @@ def write_csv(name, header, rows):
     return rows
 
 
+# A ban can be limited to a dosage form or release type ("Aceclofenac (SR) + Paracetamol" bans only the
+# sustained-release tablet, not the common one): the brand name must then show it too
+BAN_FORMS = {"injection": r"injection|\binj\b", "syrup": r"syrup", "suspension": r"suspension", "drops": r"\bdrops?\b",
+             "dispersible": r"dispersible|\bdt\b", "gel": r"\bgel\b", "cream": r"cream", "ointment": r"ointment",
+             "lotion": r"lotion", "SR": r"\bsr\b|sustained", "ER": r"\ber\b|extended", "MR": r"\bmr\b|modified",
+             "CR": r"\bcr\b|controlled", "XR": r"\bxr\b"}
+BAN_STRENGTH = re.compile(r"\d+(?:\.\d+)?\s*(?:mg|mcg|gm?|iu|%|units?)\b", re.I)
+BAN_WORDS = re.compile(r"\b(?:fixed dose combinations? of|combi ?kit of|kit of|\d+ tablets? of|tablets?|capsules?|"
+                       r"syrup|suspension|injection|dispersible|drops|gel|cream|ointment|lotion|per \d+ ?ml|"
+                       r"enteric coated|sr|er|mr|cr|xr|ip|bp|usp)\b", re.I)
+NUMBER = re.compile(r"\d+(?:\.\d+)?")
+
+
+def banned_combinations(res, brands, contains):
+    """Indian brands whose ingredients are a combination banned by CDSCO (data/cdsco/banned_fdcs.csv).
+    Precision first, since a wrong "banned" label is worse than a missed one. A brand matches only when:
+    its ingredients are exactly the banned set (brands whose composition the source cut off are never matched,
+    their missing ingredient is unknown), its name shows any form or release type the ban names, and, for a
+    ban on particular strengths, its name lists those strengths. Rows whose ban is not in force are skipped."""
+    known = sorted(res.lookup)
+
+    def ingredient(part):
+        name = BAN_WORDS.sub(" ", BAN_STRENGTH.sub(" ", re.sub(r"\([^)]*\)", " ", part)))
+        name = re.sub(r"\s+", " ", NUMBER.sub(" ", name)).strip(" .,&-/")
+        if not name:
+            return None
+        if not res.dc_id(name):                                   # typos in the gazette ("Acelofenac")
+            close = difflib.get_close_matches(norm(name), known, n=1, cutoff=0.88)
+            name = close[0] if close else name
+        return res.key(name)
+
+    parts = defaultdict(set)
+    for bk, dk, _ in contains:
+        if bk.startswith("IN:"):
+            parts[bk].add(dk)
+    complete = {b[0]: b[1] for b in brands if b[0].startswith("IN:") and not b[11]}
+    by_set = defaultdict(list)                                     # ingredient set -> complete Indian brands
+    for bk, keys in parts.items():
+        if bk in complete:
+            by_set[frozenset(keys)].append(bk)
+
+    bans, banned = [], set()
+    with open(DATA / "cdsco/banned_fdcs.csv", encoding="utf-8", newline="") as fh:
+        for i, r in enumerate(csv.DictReader(fh)):
+            if r["status"] != "banned":
+                continue
+            text = r["combination"]
+            listed = [k for k in (ingredient(p) for p in re.split(r"\s*\+\s*", text)) if k]
+            keys = frozenset(listed)
+            # two listed salts of one drug ("metoprolol succinate + metoprolol tartrate") would merge into one
+            # ingredient and wrongly match the ordinary product: skip such a ban
+            if len(keys) < 2 or len(keys) < len(listed) or not by_set.get(keys):
+                continue
+            forms = [f for f, pat in BAN_FORMS.items() if re.search(pat, text, re.I)]
+            doses = {float(n) for m in BAN_STRENGTH.finditer(text) for n in NUMBER.findall(m.group(0))}
+            key = f"BAN:{i}"
+            hits = []
+            for bk in by_set[keys]:
+                name = complete[bk]
+                if forms and not any(re.search(BAN_FORMS[f], name, re.I) for f in forms):
+                    continue
+                if doses:                                           # strength-specific ban
+                    own = [float(n) for n in NUMBER.findall(" ".join(m.group(0) for m in BAN_STRENGTH.finditer(name)))]
+                    if len(own) != len(keys) or not set(own) <= doses:
+                        continue
+                hits.append(bk)
+            if hits:
+                bans.append((key, text, r["notification"], r["date"], r["list"], "/".join(forms)))
+                banned.update((bk, key) for bk in hits)
+    return bans, sorted(banned)
+
+
+# Label sections searched for sentences about other medicines, most important first
+EVIDENCE_SECTIONS = ["boxed_warning", "contraindications", "drug_interactions", "warnings_and_cautions", "warnings"]
+LABEL_SENTENCE = re.compile(r"(?<=[.;])\s+(?=[A-Z(])")
+LABEL_REFS = re.compile(r"\[\s*see [^\]]*\]|\(\s*\d+(?:\.\d+)*\s*(?:,\s*\d+(?:\.\d+)*\s*)*\)", re.I)
+LABEL_CLASSES = [(re.compile(rf"\b(?:{pattern})\b", re.I), classes) for pattern, classes in LABEL_CLASS_TERMS.items()]
+# single words that are also drug synonyms but in a label usually mean something else
+NOT_A_MENTION = {"iron", "water", "oxygen", "gold", "lead", "sodium", "potassium", "calcium", "magnesium", "zinc",
+                 "glucose", "dextrose", "protein", "vitamin", "salt", "sugar", "caffeine"}
+MENTIONS_PER_PAIR = 3
+
+
+def label_sentences(text):
+    for sentence in LABEL_SENTENCE.split(re.sub(r"\s+", " ", LABEL_REFS.sub("", text))):
+        sentence = sentence.strip()
+        letters = [c for c in sentence if c.isalpha()]
+        # boxed warnings list their headings in capitals without full stops ("USE WITH BENZODIAZEPINES OR ..."),
+        # which would run together into a garbled quote
+        if 30 <= len(sentence) <= 600 and sum(c.isupper() for c in letters) <= 0.4 * len(letters):
+            yield sentence
+
+
+def label_evidence(res, graph_drugs):
+    """openFDA labels (data/fda/labels.jsonl.gz): one Label per drug, and the sentences in drug A's label that
+    name drug B ((A)-[:LABEL_MENTIONS]->(B)) or a group B belongs to (kept on the label, matched at query time)."""
+    labels, mentions = [], {}
+    with gzip.open(DATA / "fda/labels.jsonl.gz", "rt", encoding="utf-8") as fh:
+        for line in fh:
+            lab = json.loads(line)
+            a, sections = lab["drug"], lab["sections"]
+            if a not in graph_drugs:
+                continue
+            class_notes = []
+            for section in EVIDENCE_SECTIONS:
+                for sentence in label_sentences(sections.get(section, "")):
+                    words = re.findall(r"[a-z0-9][a-z0-9'\-]*", sentence.lower())
+                    named = set()
+                    for n in (1, 2, 3, 4):
+                        for i in range(len(words) - n + 1):
+                            gram = " ".join(words[i:i + n])
+                            if n == 1 and (len(gram) < 5 or gram in NOT_A_MENTION):
+                                continue
+                            if gram in res.lookup and f"DC:{res.lookup[gram]}" in graph_drugs:
+                                named.add(f"DC:{res.lookup[gram]}")
+                    for b in named - {a}:
+                        found = mentions.setdefault((a, b), [])
+                        if len(found) < MENTIONS_PER_PAIR and sentence not in found:
+                            found.append(sentence)
+                    classes = sorted({c for pattern, cs in LABEL_CLASSES if pattern.search(sentence) for c in cs})
+                    if classes and len(class_notes) < 60:
+                        class_notes.append({"classes": classes, "text": sentence})
+            labels.append((a, lab["set_id"], lab["effective"], lab["substance"], lab["brand"],
+                           *(sections.get(k, "") for k in ("boxed_warning", "indications_and_usage", "contraindications",
+                                                           "information_for_patients", "geriatric_use", "pregnancy")),
+                           json.dumps(class_notes, ensure_ascii=False)))
+    return labels, [(a, b, json.dumps(t, ensure_ascii=False)) for (a, b), t in sorted(mentions.items())]
+
+
+def beers_guidelines(res, drug_names, drug_classes):
+    """AGS Beers Criteria 2023 (data/beers/beers_2023.csv, see src/make_beers.py): one Guideline per criterion and
+    (Drug)-[:FLAGGED_BY {side}]->(Guideline) for every drug it names or whose class it names. A name that matches
+    no drug stops the build, so a typo cannot silently drop a warning."""
+    by_name = {n.lower(): k for k, n in drug_names.items()}
+    with open(DATA / "beers/beers_2023.csv", encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    table7 = next(r["drugs"] for r in rows if r["id"] == "T7")
+    split = lambda text: [x.strip() for x in text.replace("@table7", table7).split(";") if x.strip()]
+
+    def keys(names, atc, exclude):
+        out = set()
+        for name in split(names):
+            k = by_name.get(name.lower()) or (f"DC:{res.dc_id(name)}" if res.dc_id(name) else None)
+            if k not in drug_names:
+                raise SystemExit(f"Beers criteria: no drug named {name!r} (fix src/make_beers.py)")
+            out.add(k)
+        prefixes = split(atc)
+        out |= {k for k in drug_names if any(c.startswith(p) for c in drug_classes.get(k, ()) for p in prefixes)}
+        return out - keys(exclude, "", "") if exclude else out
+
+    guidelines, flagged = [], []
+    for r in rows:
+        if r["kind"] == "list":
+            continue
+        guidelines.append((f"BEERS:{r['id']}", r["table"], r["page"], r["kind"], r["title"], r["advice"], r["reason"],
+                           r["evidence"], r["points"], r["condition"], r["min_count"]))
+        flagged += [(k, f"BEERS:{r['id']}", "a") for k in sorted(keys(r["drugs"], r["atc"], r["exclude"]))]
+        if r["kind"] == "pair":
+            flagged += [(k, f"BEERS:{r['id']}", "b") for k in sorted(keys(r["drugs_b"], r["atc_b"], r["exclude"]))]
+    return guidelines, flagged
+
+
 def main():
     print("Building clean CSVs in build/ ...")
     res = DrugResolver()
@@ -296,6 +463,41 @@ def main():
                 m = re.match(r"\s*(.*?)\s*(?:\((.*?)\))?\s*$", p)
                 contains.append((bk, drug(m.group(1), "india_az"), (m.group(2) or "").strip()))
     print(f"  (Indian brands flagged 'composition may be incomplete': {incomplete:,})")
+    # --- 250k Indian medicines: plain-language uses and side effects, habit forming, same-composition substitutes.
+    # Matched to the A-Z brands by name (same publisher); a substitute becomes (Brand)-[:SUBSTITUTE]->(Brand), but
+    # only when the two really have the same ingredients (0.3% of the source's substitutes do not, e.g.
+    # levofloxacin listed for ciprofloxacin) and no known strength differs (Cefritz S 1000 mg/500 mg is not
+    # Monotax SB 250 mg/125 mg). The link records whether every strength was known on both sides.
+    ingredients, strength = defaultdict(set), defaultdict(dict)
+    for bk, dk, st in contains:
+        ingredients[bk].add(dk)
+        amount = re.match(r"[\d.]+\s*(?:mg|mcg|gm?|iu|%|ml)?", re.sub(r"\s+", "", st.lower()))
+        strength[bk][dk] = amount.group(0) if amount and amount.group(0) else None
+    by_name = defaultdict(list)
+    for b in brands:
+        by_name[norm(b[1])].append(b[0])
+    details, substitutes = [], set()
+    with gzip.open(DATA / "india/medicine_details.csv.gz", "rt", encoding="utf-8", newline="") as fh:
+        for r in csv.DictReader(fh):
+            for bk in by_name.get(norm(r["name"]), []):
+                details.append((bk, r["uses"], r["side_effects"], r["habit_forming"], r["therapeutic_class"],
+                                r["action_class"], r["chemical_class"]))
+                for sub in r["substitutes"].split("|"):
+                    for sk in by_name.get(norm(sub), []):
+                        if sk == bk or ingredients[sk] != ingredients[bk]:
+                            continue
+                        pairs = [(strength[bk].get(d), strength[sk].get(d)) for d in ingredients[bk]]
+                        if any(a and b and a != b for a, b in pairs):
+                            continue
+                        substitutes.add((bk, sk, all(a and b for a, b in pairs)))
+    write_csv("brand_details.csv", ["brand", "uses", "side_effects", "habit_forming", "therapeutic_class",
+                                    "action_class", "chemical_class"], details)
+    write_csv("substitutes.csv", ["brand", "substitute", "same_strength"], sorted(substitutes))
+
+    bans, banned = banned_combinations(res, brands, contains)
+    write_csv("bans.csv", ["key", "combination", "notification", "date", "list", "form"], bans)
+    write_csv("banned_under.csv", ["brand", "ban"], banned)
+    print(f"  (Indian brands matching a combination banned in India: {len({b for b, _ in banned}):,})")
 
     # --- Jan Aushadhi generics: parse ingredient names out of the product description.
     # Stop words must match whole words ("g" must not cut "glimepiride"); numbers and % stop anywhere.
@@ -358,6 +560,28 @@ def main():
         raw_names[k].add(raw)
     write_csv("merge_log.csv", ["key", "name", "raw_names"],
               ((k, drug_names.get(k, ""), " | ".join(sorted(v))) for k, v in sorted(raw_names.items()) if len(v) > 1))
+
+    # --- openFDA labels: what the official label says, and which other medicines each label warns about
+    labels, mentions = label_evidence(res, drug_names)
+    write_csv("labels.csv", ["drug", "set_id", "effective", "substance", "brand", "boxed_warning", "indications",
+                             "contraindications", "patient_info", "geriatric_use", "pregnancy", "class_notes"], labels)
+    write_csv("label_mentions.csv", ["a", "b", "sentences"], mentions)
+
+    # --- TWOSIDES: side effects reported far more often when two drugs are taken together (FDA reports)
+    together = defaultdict(list)
+    with gzip.open(DATA / "twosides/twosides_pairs.csv.gz", "rt", encoding="utf-8", newline="") as fh:
+        for r in csv.DictReader(fh):
+            if r["a"] in drug_names and r["b"] in drug_names:
+                together[(r["a"], r["b"])].append((r["effect"], int(r["reports"]), float(r["prr"])))
+    write_csv("reported_together.csv", ["a", "b", "effects", "reports", "prr"],
+              ((a, b, json.dumps([e for e, _, _ in v]), json.dumps([n for _, n, _ in v]), json.dumps([p for _, _, p in v]))
+               for (a, b), v in sorted(together.items())))
+
+    # --- AGS Beers Criteria 2023: medicines to avoid or use with care in adults aged 65 and over
+    guidelines, flagged = beers_guidelines(res, drug_names, drug_classes)
+    write_csv("guidelines.csv", ["key", "table", "page", "kind", "title", "advice", "reason", "evidence", "points",
+                                 "condition", "min_count"], guidelines)
+    write_csv("flagged_by.csv", ["drug", "guideline", "side"], flagged)
 
     # --- Drugs: one row per key, with drug class codes for duplicate detection
     write_csv("drugs.csv", ["key", "name", "dc_id", "atc_classes", "atc_class_names", "sources", "is_alcohol"],

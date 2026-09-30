@@ -6,12 +6,14 @@ produced it, so each warning can be explained.
 """
 import csv
 import difflib
+import json
 import re
 from collections import defaultdict
 from functools import lru_cache
 
 from config import ROOT
-from curated import CASCADE_RULES, CONDITION_GROUPS, ALCOHOL_MEANING, EFFECT_GROUPS, SEVERITY_MEANING
+from curated import (ALCOHOL_MEANING, CASCADE_RULES, CONDITION_GROUPS, EFFECT_GROUPS, REPORTED_EFFECTS,
+                     SEVERITY_MEANING)
 from prepare_data import DrugResolver
 
 SEVERITY_WEIGHT = {"Major": 3, "Moderate": 2, "Minor": 1, "Unknown": 1}
@@ -72,12 +74,16 @@ def _exact_medicine(driver, name):
         CALL () {
           MATCH (b:Brand {name_lower: toLower($t)})-[:CONTAINS]->(d:Drug)
           WITH b, collect(d {.key, .name}) AS drugs ORDER BY b.discontinued, b.source, b.key
-          RETURN 'brand' AS kind, b.name AS label, drugs, coalesce(b.composition_incomplete, false) AS incomplete LIMIT 1
+          RETURN 'brand' AS kind, b.name AS label, b.key AS brand_key, drugs,
+                 coalesce(b.composition_incomplete, false) AS incomplete,
+                 [(b)-[:BANNED_UNDER]->(x:Ban) | x {.combination, .notification, date: toString(x.date), .list}] AS bans
+          LIMIT 1
           UNION
           MATCH (d:Drug {name_lower: toLower($t)})
-          RETURN 'ingredient' AS kind, d.name AS label, [d {.key, .name}] AS drugs, false AS incomplete LIMIT 1
+          RETURN 'ingredient' AS kind, d.name AS label, null AS brand_key, [d {.key, .name}] AS drugs,
+                 false AS incomplete, [] AS bans LIMIT 1
         }
-        RETURN kind, label, drugs, incomplete ORDER BY kind DESC LIMIT 1""", t=name.strip())
+        RETURN kind, label, brand_key, drugs, incomplete, bans ORDER BY kind DESC LIMIT 1""", t=name.strip())
     return records[0].data() if records else None
 
 
@@ -198,8 +204,107 @@ def _shared_effects(profile, a, b, limit=2):
     return [g for g in profile.get(a, []) if g in profile.get(b, [])][:limit]
 
 
-def _findings(driver, meds, conditions):
-    """All risks inside one medicine list. meds: resolved medicines; conditions: resolved conditions."""
+DAILYMED = "https://dailymed.nlm.nih.gov/dailymed/lookup.cfm?setid="
+
+
+def _add_quote(quotes, drug, text, set_id):
+    """Adds a label sentence unless one already kept says the same (labels repeat a sentence under its heading)."""
+    if not any(text in q["text"] or q["text"] in text for q in quotes):
+        quotes.append({"drug": drug, "text": text, "url": DAILYMED + set_id})
+
+
+def _pair_evidence(driver, keys, profile):
+    """What independent sources say about each pair in the list, keyed by frozenset({a, b}):
+    label: sentences from one drug's FDA label that name the other drug or a group it belongs to;
+    reported: side effects reported far more often when both are taken (TWOSIDES, FDA adverse event reports)."""
+    label, reported = defaultdict(list), {}
+    for r in driver.execute_query("""
+            MATCH (a:Drug)-[m:LABEL_MENTIONS]->(b:Drug)
+            WHERE a.key IN $k AND b.key IN $k
+            MATCH (a)-[:HAS_LABEL]->(l:Label)
+            RETURN a.key AS ak, a.name AS a, b.key AS bk, m.sentences AS sentences, l.set_id AS set_id""", k=keys).records:
+        for t in r["sentences"]:
+            _add_quote(label[frozenset((r["ak"], r["bk"]))], r["a"], t, r["set_id"])
+    # sentences naming a group ("NSAIDs", "drugs that prolong the QT interval") the other drug belongs to
+    atc = {r["key"]: r["atc"] for r in driver.execute_query(
+        "MATCH (d:Drug) WHERE d.key IN $k RETURN d.key AS key, coalesce(d.atc_classes, []) AS atc", k=keys).records}
+    for r in driver.execute_query("""
+            MATCH (a:Drug)-[:HAS_LABEL]->(l:Label) WHERE a.key IN $k AND l.class_notes <> '[]'
+            RETURN a.key AS ak, a.name AS a, l.class_notes AS notes, l.set_id AS set_id""", k=keys).records:
+        notes = json.loads(r["notes"])
+        for bk in keys:
+            if bk == r["ak"]:
+                continue
+            groups = {g["id"] for g in profile.get(bk, [])}
+            hits = [n["text"] for n in notes
+                    if any(c in groups or any(x.startswith(c) for x in atc.get(bk, [])) for c in n["classes"])]
+            for t in hits[:2]:
+                _add_quote(label[frozenset((r["ak"], bk))], r["a"], t, r["set_id"])
+    for r in driver.execute_query("""
+            MATCH (a:Drug)-[t:REPORTED_TOGETHER]->(b:Drug) WHERE a.key IN $k AND b.key IN $k
+            RETURN a.key AS ak, b.key AS bk, t.effects AS effects, t.reports AS reports""", k=keys).records:
+        reported[frozenset((r["ak"], r["bk"]))] = [{"effect": e, "reports": n}
+                                                    for e, n in zip(r["effects"], r["reports"])][:6]
+    return label, reported
+
+
+BEERS_AGE = 65
+BEERS_KIND = {"avoid": "Not advised over 65", "condition": "Not advised with this condition over 65",
+              "pair": "Combination to avoid over 65", "count": "Too many of one kind over 65",
+              "caution": "Use with care over 65"}
+
+
+def _beers(driver, keys, owner, names, conditions, found, add):
+    """AGS Beers Criteria 2023 for a patient aged 65 or over, as findings (see src/make_beers.py).
+    A combination DDInter already flagged gets the Beers advice attached instead of being counted twice, and a
+    condition DrugCentral already flagged for that drug is not repeated."""
+    rules = {}
+    for r in driver.execute_query("""
+            MATCH (d:Drug)-[f:FLAGGED_BY]->(g:Guideline) WHERE d.key IN $k
+            RETURN g {.*} AS g, d.key AS drug, f.side AS side""", k=keys).records:
+        rule = rules.setdefault(r["g"]["key"], {"g": r["g"], "a": [], "b": []})
+        rule[r["side"]].append(r["drug"])
+    patient = {c["name"] for c in conditions}
+    unsafe = {(k, f["title"].split(" should not be used with ")[-1]) for f in found
+              if f["kind"] == "Unsafe for patient's condition" for k in f["drugs"]}
+    pairs = {frozenset(f["drugs"]): f for f in found if len(f["drugs"]) == 2}
+    cite = lambda g: f"Beers 2023 Table {g['table']}, p. {g['page']}: {g['title']}"
+    for rule in sorted(rules.values(), key=lambda r: (r["g"]["table"], r["g"]["key"])):
+        g, a, b = rule["g"], rule["a"], rule["b"]
+        meaning = f"{g['reason']} {g['advice']}".strip()
+        kind = BEERS_KIND[g["kind"]]
+        if g["kind"] in ("avoid", "caution"):
+            for k in a:
+                title = (f"{names[k]} is not advised for older adults" if g["kind"] == "avoid" and g["points"] >= 2
+                         else f"{names[k]} may not suit an older adult: check if this applies" if g["kind"] == "avoid"
+                         else f"{names[k]}: {g['title'][0].lower()}{g['title'][1:]}")
+                add(kind, g["points"], title, f"({names[k]})-[FLAGGED_BY]->({cite(g)})", [k], meaning)
+        elif g["kind"] == "condition" and g["condition"] in patient:
+            for k in a:
+                if (k, g["condition"].lower()) not in unsafe:
+                    add(kind, g["points"], f"{names[k]}: {g['title'].lower()}",
+                        f"({names[k]})-[FLAGGED_BY]->({cite(g)}) <- ({g['condition']})", [k], meaning)
+        elif g["kind"] == "pair":
+            for x in a:
+                for y in b:
+                    if x == y or owner[x] & owner[y] or (x > y and x in b and y in a):
+                        continue       # same drug, same product, or the same pair seen from the other side
+                    existing = pairs.get(frozenset((x, y)))
+                    if existing:
+                        existing.setdefault("beers", []).append(f"{cite(g)}. {g['advice']}")
+                    else:
+                        add(kind, g["points"], f"{names[x]} + {names[y]}: {g['title'].lower()}",
+                            f"({names[x]})-[FLAGGED_BY]->({cite(g)})<-[FLAGGED_BY]-({names[y]})", [x, y], meaning)
+        elif g["kind"] == "count":
+            if len({i for k in a for i in owner[k]}) >= g["min_count"]:
+                listed = ", ".join(names[k] for k in a)
+                add(kind, g["points"], f"{g['title']}: {listed}",
+                    f"({listed})-[FLAGGED_BY]->({cite(g)})", sorted(a), meaning)
+
+
+def _findings(driver, meds, conditions, age=None):
+    """All risks inside one medicine list. meds: resolved medicines; conditions: resolved conditions;
+    age: the patient's age, when given (the Beers Criteria apply from 65)."""
     owner = defaultdict(set)            # drug key -> indexes of the medicines that contain it
     for i, m in enumerate(meds):
         for d in m["drugs"]:
@@ -279,6 +384,15 @@ def _findings(driver, meds, conditions):
             f"{d} is recorded as harmful for people with {condition.lower()}: it can make the condition worse "
             f"or cause complications.")
 
+    # 2d. A brand whose combination the Government of India has banned (CDSCO, Section 26A)
+    for m in meds:
+        for x in m.get("bans", []):
+            add("Banned in India", 3, f"{m['label']} is a combination banned in India",
+                f"({m['label']})-[BANNED_UNDER]->({x['notification']}, {x['date']})", [d["key"] for d in m["drugs"]],
+                f"The Government of India banned the combination {x['combination']} (notification {x['notification']}, "
+                f"{x['date']}) because it has no proven benefit or may be unsafe. Ask the doctor for a replacement "
+                f"and do not buy it again. Stock bought before the ban may still be in shops or at home.")
+
     # 4. Prescribing cascades: A causes a side effect that B (also taken) is used to treat.
     #    Only textbook patterns (curated.CASCADE_RULES), and only when the graph has both edges.
     cascades = {}
@@ -305,6 +419,18 @@ def _findings(driver, meds, conditions):
             c["paths"][0], [ak, bk],
             f"If {c['b']} was started to treat a side effect of {c['a']}, changing {c['a']} may be better "
             f"than adding another medicine.")
+
+    # 6. Older adults: AGS Beers Criteria 2023
+    if age is not None and age >= BEERS_AGE:
+        _beers(driver, keys, owner, {d["key"]: d["name"] for m in meds for d in m["drugs"]}, conditions, found, add)
+
+    # what the official labels and real-world reports say about each flagged pair
+    label, reported = _pair_evidence(driver, keys, profile)
+    for f in found:
+        pair = frozenset(f["drugs"])
+        f["label"] = label.get(pair, [])[:3] if len(pair) == 2 else []
+        f["reported"] = reported.get(pair, []) if len(pair) == 2 else []
+        f.setdefault("beers", [])
     return found, owner
 
 
@@ -392,6 +518,87 @@ def _alternatives(driver, drug_key, all_keys, ckeys, limit=3):
         d=drug_key, all=all_keys, c=ckeys, limit=limit, groups=[names for _, names in CONDITION_GROUPS.values()]).records]
 
 
+def _lead(text, limit, prefer=None):
+    """The opening sentences of a label section, without its heading ("1 INDICATIONS AND USAGE"), starting at the
+    first of the first three sentences that contains `prefer` when given ("indicated")."""
+    text = re.sub(r"^\s*[\d.]*\s*INDICATIONS\s*(?:AND|&)\s*USAGE\s*", "", re.sub(r"\s+", " ", text or "")).strip()
+    text = re.sub(r"\s*(?:\(\s*\d+(?:\.\d+)*\s*\)|\[\s*see [^\]]*\])", "", text, flags=re.I)
+    sentences = re.split(r"(?<=[.])\s+(?=[A-Z])", text)
+    if prefer:
+        first = next((i for i, x in enumerate(sentences[:3]) if prefer in x.lower()), 0)
+        sentences = sentences[first:]
+    out = ""
+    for sentence in sentences:
+        if out and len(out) + len(sentence) > limit:
+            break
+        out += (" " if out else "") + sentence
+    return out[:limit + 80]
+
+
+def about_medicines(driver, meds):
+    """Per ingredient: what its official (US FDA) label says it is for, its boxed warning, and a link to the label."""
+    keys = list(dict.fromkeys(d["key"] for m in meds for d in m["drugs"]))
+    records = {r["key"]: r for r in driver.execute_query("""
+        MATCH (d:Drug) WHERE d.key IN $k
+        OPTIONAL MATCH (d)-[:HAS_LABEL]->(l:Label)
+        RETURN d.key AS key, d.name AS name, l.indications AS indications, l.boxed_warning AS boxed,
+               l.set_id AS set_id, l.effective AS effective""", k=keys).records}
+    out = []
+    for k in keys:
+        r = records.get(k)
+        if not r:
+            continue
+        boxed = re.sub(r"\s+", " ", r["boxed"] or "").strip()
+        # "WARNING: FETAL TOXICITY • When pregnancy ..." -> title "Fetal toxicity"; other labels have no title
+        headline = re.match(r"WARNINGS?:\s*((?:[A-Z0-9,;'()/&-]+\s+)+?)(?=[•\[]|[A-Z][a-z])", boxed)
+        out.append({"drug": r["name"], "used_for": _lead(r["indications"], 260, prefer="indicated"),
+                    "boxed_title": headline.group(1).strip(" ,;").capitalize() if headline else "",
+                    "boxed": _lead((boxed[headline.end():] if headline else boxed).lstrip("• "), 320) if boxed else "",
+                    "url": DAILYMED + r["set_id"] if r["set_id"] else "",
+                    "effective": f"{r['effective'][:4]}-{r['effective'][4:6]}" if r["effective"] else ""})
+    return out
+
+
+PACK_UNITS = re.compile(r"\bof (\d+) (tablet|capsule|sachet|strip)s?\b", re.I)
+
+
+def _unit_price(price, pack):
+    """'strip of 15 tablets', 34.27 -> (2.28, 'tablet'); None when the pack does not say how many units."""
+    m = PACK_UNITS.search(pack or "")
+    return (round(price / int(m.group(1)), 2), m.group(2).lower()) if m and price and int(m.group(1)) else None
+
+
+def about_brands(driver, meds, substitutes=3):
+    """Per Indian brand in the list: what it is used for, common side effects and whether it is habit forming
+    (250k Indian medicines dataset), and same-ingredient substitutes still sold, cheapest per tablet first.
+    Pack sizes differ, so prices are compared per tablet/capsule, or per pack only when the packs are the same."""
+    keys = [m["brand_key"] for m in meds if m.get("brand_key")]
+    out = []
+    for r in driver.execute_query("""
+            UNWIND $k AS key
+            MATCH (b:Brand {key: key})
+            CALL (b) {
+              OPTIONAL MATCH (b)-[x:SUBSTITUTE]->(s:Brand)
+              WHERE NOT s.discontinued AND s.price > 0 AND NOT EXISTS { (s)-[:BANNED_UNDER]->() }
+              RETURN collect(s {.name, .price, .pack, .manufacturer, same_strength: x.same_strength}) AS subs
+            }
+            RETURN b.name AS name, b.price AS price, b.pack AS pack, b.discontinued AS discontinued,
+                   coalesce(b.uses, []) AS uses, coalesce(b.side_effects, []) AS side_effects,
+                   coalesce(b.habit_forming, false) AS habit_forming, b.therapeutic_class AS therapeutic_class, subs""",
+            k=keys).records:
+        own = _unit_price(r["price"], r["pack"])
+        subs = []
+        for s in r["subs"]:
+            unit = _unit_price(s["price"], s["pack"])
+            comparable = unit and own and unit[1] == own[1] and s["same_strength"]
+            subs.append({**s, "unit": unit, "cheaper": (unit[0] < own[0]) if comparable else
+                         (s["same_strength"] and s["pack"] == r["pack"] and bool(r["price"]) and s["price"] < r["price"])})
+        subs.sort(key=lambda s: (not s["same_strength"], s["unit"] is None, s["unit"][0] if s["unit"] else s["price"]))
+        out.append({**r.data(), "unit": own, "uses": r["uses"][:3], "side_effects": r["side_effects"][:8],
+                    "subs": subs[:substitutes]})
+    return out
+
+
 def top_risk_medicines(driver, limit=20):
     """6. Medicines that interact with the most others, weighted by severity (GDS degree centrality)."""
     return [r.data() for r in driver.execute_query("""
@@ -401,7 +608,7 @@ def top_risk_medicines(driver, limit=20):
         ORDER BY risk_score DESC LIMIT $limit""", limit=limit).records]
 
 
-def analyse(driver, medicine_texts, condition_texts, new_medicine=None):
+def analyse(driver, medicine_texts, condition_texts, new_medicine=None, age=None):
     meds, conditions, unknown = [], [], []
 
     def not_found(text, kind, field):
@@ -414,8 +621,9 @@ def analyse(driver, medicine_texts, condition_texts, new_medicine=None):
         c = resolve_condition(driver, t)
         (conditions.append(c) if c else not_found(t, "condition", "conditions"))
 
-    findings, owner = _findings(driver, meds, conditions)
-    cascades = [f for f in findings if f["weight"] == 0]
+    findings, owner = _findings(driver, meds, conditions, age)
+    cascades = [f for f in findings if f["kind"] == "Possible prescribing cascade"]
+    cautions = [f for f in findings if f["kind"] == BEERS_KIND["caution"]]
     findings = sorted((f for f in findings if f["weight"] > 0), key=lambda f: -f["weight"])
     score = sum(f["weight"] for f in findings)
     keys, ckeys = list(owner), [k for c in conditions for k in c["keys"]]
@@ -434,7 +642,7 @@ def analyse(driver, medicine_texts, condition_texts, new_medicine=None):
     if new_medicine and new_medicine.strip():
         extra = resolve_medicine(driver, new_medicine)
         if extra:
-            new_findings, _ = _findings(driver, meds + [extra], conditions)
+            new_findings, _ = _findings(driver, meds + [extra], conditions, age)
             new_score = sum(f["weight"] for f in new_findings)
             existing = {f["title"] for f in findings}
             what_if = {"medicine": extra["label"], "before": score, "after": new_score,
@@ -458,5 +666,6 @@ def analyse(driver, medicine_texts, condition_texts, new_medicine=None):
         "MATCH (d:Drug) WHERE d.key IN $k RETURN d.name AS name, toInteger(d.risk_score) AS risk_score",
         k=keys).records}
     return {"medicines": meds, "conditions": conditions, "unknown": unknown, "score": score, "level": risk_level(findings),
-            "findings": findings, "cascades": cascades, "coverage": _coverage(driver, meds, conditions, findings), "alcohol": _alcohol(driver, keys, profile), "stacked": stacked, "alternatives": alternatives,
-            "deprescribe": deprescribe, "what_if": what_if, "drug_risk": risk}
+            "findings": findings, "cascades": cascades, "coverage": _coverage(driver, meds, conditions, findings), "alcohol": _alcohol(driver, keys, profile), "stacked": stacked, "about": about_medicines(driver, meds),
+            "brands": about_brands(driver, meds), "alternatives": alternatives,
+            "deprescribe": deprescribe, "what_if": what_if, "drug_risk": risk, "age": age, "cautions": cautions}

@@ -15,16 +15,23 @@ def _lines(text):
     return [t.strip() for t in (text or "").splitlines() if t.strip()]
 
 
+def _age(text):
+    """A whole number of years from 0 to 120, or None (blank or anything else)."""
+    text = (text or "").strip()
+    return int(text) if text.isdigit() and int(text) <= 120 else None
+
+
 @app.get("/")
 def index():
     medicines = request.args.get("medicines", "")
     conditions = request.args.get("conditions", "")
     new_medicine = request.args.get("new_medicine", "")
+    age = _age(request.args.get("age"))
     result = None
     if _lines(medicines):
-        result = queries.analyse(driver, _lines(medicines), _lines(conditions), new_medicine)
+        result = queries.analyse(driver, _lines(medicines), _lines(conditions), new_medicine, age)
     return render_template("index.html", medicines=medicines, conditions=conditions, new_medicine=new_medicine,
-                           result=result, top_risk=queries.top_risk_medicines(driver, 10))
+                           age=age, result=result, top_risk=queries.top_risk_medicines(driver, 10))
 
 
 @app.get("/api/suggest")

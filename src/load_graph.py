@@ -4,6 +4,7 @@ Wipes the database first, so it is safe to run again after changing the data.
 Run:  python src/load_graph.py        (run src/prepare_data.py first)
 """
 import csv
+import json
 import time
 
 from config import ROOT, get_driver
@@ -18,6 +19,8 @@ SCHEMA = [
     "CREATE CONSTRAINT condition_key IF NOT EXISTS FOR (c:Condition) REQUIRE c.key IS UNIQUE",
     "CREATE CONSTRAINT side_effect_key IF NOT EXISTS FOR (s:SideEffect) REQUIRE s.key IS UNIQUE",
     "CREATE CONSTRAINT enzyme_name IF NOT EXISTS FOR (e:Enzyme) REQUIRE e.name IS UNIQUE",
+    "CREATE CONSTRAINT ban_key IF NOT EXISTS FOR (x:Ban) REQUIRE x.key IS UNIQUE",
+    "CREATE CONSTRAINT guideline_key IF NOT EXISTS FOR (g:Guideline) REQUIRE g.key IS UNIQUE",
     "CREATE INDEX condition_cui IF NOT EXISTS FOR (c:Condition) ON (c.cui)",
     "CREATE INDEX side_effect_cui IF NOT EXISTS FOR (s:SideEffect) ON (s.cui)",
     "CREATE INDEX drug_name IF NOT EXISTS FOR (d:Drug) ON (d.name_lower)",
@@ -76,6 +79,55 @@ STEPS = [
         UNWIND $rows AS r
         MATCH (b:Brand {key: r.brand}), (d:Drug {key: r.drug}) MERGE (b)-[c:CONTAINS]->(d)
         SET c.strength = r.strength""", None),
+    ("bans.csv", """
+        UNWIND $rows AS r
+        CREATE (:Ban {key: r.key, combination: r.combination, notification: r.notification, date: date(r.date),
+                      list: r.list, form: r.form})""", None),
+    ("banned_under.csv", """
+        UNWIND $rows AS r
+        MATCH (b:Brand {key: r.brand}), (x:Ban {key: r.ban}) CREATE (b)-[:BANNED_UNDER]->(x)""", None),
+    ("brand_details.csv", """
+        UNWIND $rows AS r
+        MATCH (b:Brand {key: r.brand})
+        SET b.uses = r.uses, b.side_effects = r.side_effects, b.habit_forming = r.habit_forming,
+            b.therapeutic_class = r.therapeutic_class, b.action_class = r.action_class,
+            b.chemical_class = r.chemical_class""",
+     lambda r: {**r, "uses": [u for u in r["uses"].split("|") if u],
+                "side_effects": [e for e in r["side_effects"].split("|") if e],
+                "habit_forming": r["habit_forming"] == "True"}),
+    ("substitutes.csv", """
+        UNWIND $rows AS r
+        MATCH (b:Brand {key: r.brand}), (s:Brand {key: r.substitute})
+        CREATE (b)-[:SUBSTITUTE {same_strength: r.same_strength}]->(s)""",
+     lambda r: {**r, "same_strength": r["same_strength"] == "True"}),
+    ("guidelines.csv", """
+        UNWIND $rows AS r
+        CREATE (:Guideline {key: r.key, source: 'AGS Beers Criteria 2023', table: r.table, page: r.page,
+                            kind: r.kind, title: r.title, advice: r.advice, reason: r.reason, evidence: r.evidence,
+                            points: r.points, condition: r.condition, min_count: r.min_count})""",
+     lambda r: {**r, "table": int(r["table"]), "page": int(r["page"]), "points": int(r["points"]),
+                "min_count": int(r["min_count"]) if r["min_count"] else None}),
+    ("flagged_by.csv", """
+        UNWIND $rows AS r
+        MATCH (d:Drug {key: r.drug}), (g:Guideline {key: r.guideline}) CREATE (d)-[:FLAGGED_BY {side: r.side}]->(g)""",
+     None),
+    ("labels.csv", """
+        UNWIND $rows AS r
+        MATCH (d:Drug {key: r.drug})
+        CREATE (d)-[:HAS_LABEL]->(:Label {set_id: r.set_id, effective: r.effective, substance: r.substance,
+                                          brand: r.brand, boxed_warning: r.boxed_warning, indications: r.indications,
+                                          contraindications: r.contraindications, patient_info: r.patient_info,
+                                          geriatric_use: r.geriatric_use, pregnancy: r.pregnancy,
+                                          class_notes: r.class_notes})""", None),
+    ("label_mentions.csv", """
+        UNWIND $rows AS r
+        MATCH (a:Drug {key: r.a}), (b:Drug {key: r.b}) CREATE (a)-[:LABEL_MENTIONS {sentences: r.sentences}]->(b)""",
+     lambda r: {**r, "sentences": json.loads(r["sentences"])}),
+    ("reported_together.csv", """
+        UNWIND $rows AS r
+        MATCH (a:Drug {key: r.a}), (b:Drug {key: r.b})
+        CREATE (a)-[:REPORTED_TOGETHER {effects: r.effects, reports: r.reports, prr: r.prr}]->(b)""",
+     lambda r: {**r, "effects": json.loads(r["effects"]), "reports": json.loads(r["reports"]), "prr": json.loads(r["prr"])}),
 ]
 
 

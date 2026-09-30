@@ -174,6 +174,78 @@ def main():
     r = analyse(["amlodipine", "telmisartan", "hydrochlorothiazide"])
     check("three blood pressure medicines are not a low-BP warning (normal treatment)",
           "low_bp" not in [s["group"]["id"] for s in r["stacked"]], r["stacked"])
+    print("--- combinations banned in India (CDSCO)")
+    r = analyse(["Scofix AZ 200mg/250mg Tablet"])
+    check("azithromycin + cefixime brand flagged as banned in India (2018)",
+          kinds(r, "Banned in India") and r["level"]["level"] == "Critical", (kinds(r, "Banned in India"), r["level"]))
+    check("ordinary aceclofenac + paracetamol (Zerodol-P) is not banned", not kinds(analyse(["Zerodol-P"]), "Banned in India"))
+    check("sustained-release aceclofenac + paracetamol (Gloar-SR) is banned",
+          bool(kinds(analyse(["Gloar-SR Tablet"]), "Banned in India")))
+    check("a ban quashed in court is not applied (pioglitazone + metformin)",
+          not kinds(analyse(["Asoformin P 15mg/500mg Tablet"]), "Banned in India"))
+    bans = read("bans.csv")
+    check("bans listing two salts of one drug are skipped (cilnidipine + metoprolol)",
+          not any("metoprolol" in b["combination"].lower() for b in bans), [b["combination"] for b in bans if "etoprolol" in b["combination"]])
+    print("--- official labels (openFDA) and reports (TWOSIDES)")
+    labels = d.execute_query("MATCH (:Drug)-[:HAS_LABEL]->(l:Label) RETURN count(l) AS n").records[0]["n"]
+    check("most drugs have an official label", labels > 1200, labels)
+    r = analyse(["warfarin", "Brufen 400"])
+    quotes = [q["text"] for f in r["findings"] for q in f["label"]]
+    check("warfarin + ibuprofen quotes a label sentence about bleeding", any("bleed" in q.lower() for q in quotes), quotes)
+    about = {a["drug"]: a for a in r["about"]}
+    check("warfarin's boxed warning is 'Bleeding risk'", about.get("warfarin", {}).get("boxed_title") == "Bleeding risk",
+          about.get("warfarin"))
+    check("paracetamol finds its US label under the name acetaminophen", bool(analyse(["Dolo 650"])["about"][0]["url"]))
+    serious = re.compile(queries.REPORTED_EFFECTS)
+    shown = [e["effect"] for m in (["warfarin", "Brufen 400"], ["clozapine", "citalopram"], ["metformin", "glimepiride"])
+             for f in analyse(m)["findings"] for e in f["reported"]]
+    check("only serious, recognisable reported side effects are shown", shown and all(serious.search(e) for e in shown),
+          [e for e in shown if not serious.search(e)])
+    print("--- Indian brand details (250k Indian medicines)")
+    brands = {b["name"]: b for b in analyse(["Alprax 0.25 Tablet", "Dolo 650", "Augmentin 625 Duo"])["brands"]}
+    check("alprazolam brand flagged habit forming", brands.get("Alprax 0.25 Tablet", {}).get("habit_forming") is True)
+    check("paracetamol brand says what it is used for", "Treatment of Fever" in brands.get("Dolo 650 Tablet", {}).get("uses", []),
+          brands.get("Dolo 650 Tablet", {}).get("uses"))
+    subs = brands.get("Augmentin 625 Duo Tablet", {}).get("subs", [])
+    check("substitutes are offered, cheapest per tablet first",
+          len(subs) == 3 and [s["unit"][0] for s in subs] == sorted(s["unit"][0] for s in subs), subs)
+    wrong = d.execute_query("""
+        MATCH (b:Brand)-[:SUBSTITUTE]->(s:Brand)
+        WHERE COUNT { (b)-[:CONTAINS]->() } <> COUNT { (s)-[:CONTAINS]->() }
+           OR EXISTS { (b)-[:CONTAINS]->(x) WHERE NOT (s)-[:CONTAINS]->(x) }
+        RETURN count(*) AS n""").records[0]["n"]
+    check("every substitute has exactly the same ingredients (levofloxacin is not ciprofloxacin)", wrong == 0, wrong)
+    amount = lambda st: (re.match(r"[\d.]+(?:mg|mcg|gm?|iu|%|ml)?", re.sub(r"\s+", "", st.lower())) or [None])[0]
+    strengths = defaultdict(dict)
+    for c in read("contains.csv"):
+        strengths[c["brand"]][c["drug"]] = amount(c["strength"])
+    clash = [s for s in read("substitutes.csv")
+             if any(a and b and a != b for a, b in ((v, strengths[s["substitute"]].get(k))
+                                                    for k, v in strengths[s["brand"]].items()))]
+    check("no substitute differs in a known strength (1000/500 mg is not 250/125 mg)", not clash, clash[:3])
+    print("--- older adults (AGS Beers Criteria 2023)")
+    beers = lambda r: [f["title"] for f in r["findings"] if "over 65" in f["kind"]]
+    at = lambda age, meds, conds=(): queries.analyse(d, list(meds), list(conds), None, age)
+    check("diazepam flagged at 72 but not at 40 or without an age",
+          any("diazepam is not advised" in t for t in beers(at(72, ["diazepam"])))
+          and not beers(at(40, ["diazepam"])) and not beers(at(None, ["diazepam"])))
+    r = at(72, ["diazepam", "tramadol", "pregabalin"])
+    check("three brain-acting medicines flagged, counting pregabalin (ATC moved it to N02BF)",
+          any(t.startswith("Three or more medicines acting on the brain") for t in beers(r)), beers(r))
+    opioid_benzo = next((f for f in r["findings"] if "tramadol" in f["title"] and "diazepam" in f["title"]), None)
+    check("an opioid + benzodiazepine already in DDInter gets the Beers advice, not double points",
+          opioid_benzo and opioid_benzo["kind"] == "Drug interaction" and opioid_benzo["beers"], opioid_benzo)
+    r = at(70, ["amitriptyline", "promethazine"])
+    check("two anticholinergic medicines flagged", any(t.startswith("Two or more anticholinergic") for t in beers(r)),
+          beers(r))
+    check("a Beers condition warning needs the condition (sertraline + falls)",
+          any("fall" in t for t in beers(at(78, ["sertraline"], ["falls"]))) and not beers(at(78, ["sertraline"])))
+    check("situation-dependent criteria score 1, not 2 (pantoprazole)",
+          [f["weight"] for f in at(78, ["pantoprazole"])["findings"] if "over 65" in f["kind"]] == [1])
+    check("use-with-care criteria are notes, not scored (tramadol lowers sodium)",
+          any("sodium" in c["title"] for c in at(78, ["tramadol"])["cautions"]) and at(78, ["tramadol"])["score"] == 0)
+    check("lithium is not counted as an antipsychotic",
+          not any("lithium" in t for t in beers(at(78, ["lithium carbonate"]))))
     top = queries.top_risk_medicines(d, 5)
     check("GDS risk ranking is populated", len(top) == 5 and top[0]["risk_score"] > 1000, top[:2])
     d.close()

@@ -102,6 +102,16 @@ CONDITION_GROUPS = {
                      ["Acute tuberculosis", "Inactive tuberculosis", "Tuberculosis", "Pulmonary tuberculosis",
                       "Active tuberculosis"]),
     "Piles": (["piles", "hemorrhoids", "haemorrhoids"], ["Hemorrhoids", "Bleeding hemorrhoids"]),
+    # the next four are conditions the Beers Criteria (Table 3) warn about in older adults
+    "Fainting (syncope)": (["fainting", "faint", "syncope", "blackouts", "passing out"],
+                           ["Syncope", "Micturition syncope", "Syncope due to Bradycardia", "Syncope due to Heart Block"]),
+    "Delirium": (["delirium", "acute confusion", "sudden confusion"], ["Delirium"]),
+    "History of falls or fractures": (["falls", "fall", "frequent falls", "fracture", "fractures", "broken bone",
+                                       "history of falls", "osteoporosis fracture"],
+                                      ["At risk of osteoporotic fracture", "Fracture of bone", "Fracture of femur",
+                                       "Pathological fracture"]),
+    "Urinary incontinence": (["urinary incontinence", "incontinence", "urine leakage", "leaking urine"],
+                             ["Urinary incontinence", "Urge incontinence of urine", "Female stress incontinence"]),
 }
 
 # Each rule: the side effect (Hetionet names, regex), which drugs cause it (ATC class prefixes or names),
@@ -230,8 +240,15 @@ EFFECT_GROUPS = [
              "constipation and trouble passing urine.",
      "watch": "new confusion or memory problems, severe constipation, not able to pass urine, blurred vision.",
      "atc": ["N04A", "A03AA", "A03B", "G04BD", "R06AA", "R06AB", "R06AD", "N06AA"],
+     # the names include every drug on the AGS Beers Criteria 2023 Table 7 (strongly anticholinergic)
      "names": ["clozapine", "olanzapine", "quetiapine", "chlorpromazine", "thioridazine", "promethazine", "hydroxyzine",
-               "paroxetine", "disopyramide", "cyproheptadine"], "side_effects": [], "alcohol": False, "stack": True},
+               "paroxetine", "disopyramide", "cyproheptadine", "amitriptyline", "amoxapine", "clomipramine",
+               "desipramine", "doxepin", "imipramine", "nortriptyline", "prochlorperazine", "brompheniramine",
+               "chlorphenamine", "dimenhydrinate", "diphenhydramine", "doxylamine", "meclozine", "triprolidine",
+               "darifenacin", "fesoterodine", "flavoxate", "oxybutynin", "solifenacin", "tolterodine", "trospium",
+               "benzatropine", "trihexyphenidyl", "perphenazine", "atropine", "clidinium", "dicycloverine",
+               "homatropine", "hyoscyamine", "scopolamine", "cyclobenzaprine", "orphenadrine"],
+     "side_effects": [], "alcohol": False, "stack": True},
 ]
 
 # What each severity means to a patient, and what every other kind of finding means
@@ -249,3 +266,53 @@ ALCOHOL_MEANING = {
     "Minor": "Small effect. Drink only in moderation.",
     "Unknown": "Recorded as an interaction, but the source does not say how serious. Ask a pharmacist.",
 }
+
+# How drug labels name groups of medicines ("Avoid use with NSAIDs"), and the ATC class prefixes that group means.
+# A label sentence naming a group is shown for a pair when the other drug is in one of these classes.
+# Group ids from EFFECT_GROUPS can stand in for a list of classes ("drugs that prolong the QT interval").
+LABEL_CLASS_TERMS = {
+    r"nsaids?|non-?steroidal anti-?inflammatory": ["M01A"],
+    r"anticoagulants?|warfarin-type|vitamin k antagonists?": ["B01AA", "B01AE", "B01AF", "B01AB"],
+    r"antiplatelets?|platelet (?:aggregation )?inhibitors?": ["B01AC"],
+    r"ssris?|selective serotonin reuptake inhibitors?": ["N06AB"],
+    r"snris?|serotonin[- ]norepinephrine reuptake inhibitors?": ["N06AX"],
+    r"maois?|monoamine oxidase inhibitors?": ["N06AF", "N04BD"],
+    r"tricyclic antidepressants?|tcas?": ["N06AA"],
+    r"serotonergic (?:drugs|agents|medications)": ["serotonin"],
+    r"(?:drugs|medications|agents) (?:that|known to) prolong the qt|qt[- ]prolonging": ["heart_rhythm"],
+    r"cns depressants?|central nervous system depressants?": ["drowsiness"],
+    r"opioids?|opiates?|narcotic analgesics?": ["N02A", "N07BC"],
+    r"benzodiazepines?": ["N05BA", "N05CD"],
+    r"antipsychotics?|neuroleptics?": ["N05A"],
+    r"diuretics?": ["C03"],
+    r"potassium[- ]sparing diuretics?": ["C03DA", "C03DB"],
+    r"potassium supplements?|potassium-containing": ["A12B"],
+    r"ace inhibitors?|angiotensin[- ]converting enzyme inhibitors?": ["C09A", "C09B"],
+    r"angiotensin (?:ii )?receptor (?:blockers?|antagonists?)|arbs?": ["C09C", "C09D"],
+    r"beta[- ](?:adrenergic )?block(?:ers?|ing agents?)": ["C07"],
+    r"calcium channel blockers?": ["C08"],
+    r"antihypertensives?|antihypertensive (?:drugs|agents)": ["C02", "C03", "C07", "C08", "C09"],
+    r"insulin|sulfonylureas?|insulin secretagogues?|antidiabetic (?:drugs|agents)": ["A10"],
+    r"corticosteroids?|glucocorticoids?": ["H02"],
+    r"fluoroquinolones?|quinolones?": ["J01MA"],
+    r"macrolides?": ["J01FA"],
+    r"azole antifungals?": ["J02AC"],
+    r"statins?|hmg-coa reductase inhibitors?": ["C10AA"],
+    r"antacids?": ["A02A"],
+    r"proton pump inhibitors?|ppis?": ["A02BC"],
+    r"anticholinergics?|antimuscarinics?": ["anticholinergic"],
+    r"immunosuppressants?|immunosuppressive (?:drugs|agents|therapy)": ["immune"],
+}
+
+# Side effects worth showing from TWOSIDES (drug-pair reports to the US FDA). The raw data ranks rare, unrelated
+# events highest (fractures, osteoarthritis: often the reason the patient was treated, not an effect), so only
+# serious, recognisable events are kept, and they are ranked by how many reports name them.
+REPORTED_EFFECTS = (
+    r"(?i)(haemorrhage|bleeding|haematemesis|melaena|haematochezia|international normali[sz]ed ratio increased|"
+    r"qt prolonged|torsade|arrhythmia|atrial fibrillation|ventricular (tachycardia|fibrillation)|bradycardia|"
+    r"cardiac arrest|syncope|hypoglycaemia|hyperkalaemia|hyponatraemia|hypotension|renal failure|kidney injury|"
+    r"renal impairment|hepatic failure|hepatotoxicity|liver injury|hepatitis|jaundice|serotonin syndrome|"
+    r"neuroleptic malignant|seizure|convulsion|somnolence|sedation|respiratory (depression|arrest)|\bfall\b|"
+    r"confusional state|delirium|coma|loss of consciousness|neutropenia|agranulocytosis|pancytopenia|"
+    r"thrombocytopenia|lactic acidosis|rhabdomyolysis|stevens-johnson|toxic epidermal necrolysis|anaphyla|angioedema)"
+)
