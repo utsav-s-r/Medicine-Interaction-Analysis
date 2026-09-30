@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Medication Risk Check</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --text:#1d1d1b; --muted:#6b6b66; --line:#e3e2dd;
+          --major:#b42318; --moderate:#b54708; --minor:#475467; --good:#067647; --accent:#1f4e79; --on-accent:#ffffff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161615; --card:#1f1f1d; --text:#ecebe6; --muted:#a3a29c; --line:#34332f;
+            --major:#f97066; --moderate:#fdb022; --minor:#98a2b3; --good:#47cd89; --accent:#84adff; --on-accent:#0b1b33; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system, system-ui, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; } h2 { font-size: 17px; margin: 0 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+  label { font-weight: 600; display: block; margin-bottom: 6px; }
+  textarea, input[type=text] { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--text); font: inherit; }
+  textarea { min-height: 120px; resize: vertical; }
+  .add { display: flex; gap: 6px; margin-bottom: 6px; }
+  button { padding: 8px 14px; border: 0; border-radius: 8px; background: var(--accent); color: var(--on-accent); font: inherit; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .score { font-size: 32px; font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; } td, th { text-align: left; padding: 8px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; border-top: 0; }
+  .w3 { color: var(--major); font-weight: 700; } .w2 { color: var(--moderate); font-weight: 700; } .w1 { color: var(--minor); }
+  code { font-size: 12px; color: var(--muted); word-break: break-word; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line); font-size: 13px; margin: 2px 4px 2px 0; }
+  .good { color: var(--good); } .warn { color: var(--moderate); }
+  ul { margin: 0; padding-left: 18px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Medication Risk Check</h1>
+  <p class="sub">Checks a patient's whole medicine list against each other, their conditions and hidden duplicates, using a Neo4j graph.
+     Educational prototype, not a clinical tool.</p>
+
+  <form class="card" method="get" action="/">
+    <div class="grid">
+      <div>
+        <label for="medicines">Medicines (brand or ingredient, one per line)</label>
+        <div class="add"><input type="text" id="med-in" list="med-list" placeholder="Type e.g. Dolo 650" autocomplete="off">
+          <button type="button" class="ghost" onclick="addLine('med-in','medicines')">Add</button></div>
+        <datalist id="med-list"></datalist>
+        <textarea id="medicines" name="medicines">{{ medicines }}</textarea>
+      </div>
+      <div>
+        <label for="conditions">Patient's existing conditions (one per line)</label>
+        <div class="add"><input type="text" id="cond-in" list="cond-list" placeholder="Type e.g. kidney" autocomplete="off">
+          <button type="button" class="ghost" onclick="addLine('cond-in','conditions')">Add</button></div>
+        <datalist id="cond-list"></datalist>
+        <textarea id="conditions" name="conditions">{{ conditions }}</textarea>
+        <label for="new_medicine" style="margin-top:12px">What if a new medicine is added? (optional)</label>
+        <input type="text" id="new_medicine" name="new_medicine" list="med-list2" value="{{ new_medicine }}" autocomplete="off">
+        <datalist id="med-list2"></datalist>
+      </div>
+    </div>
+    <p style="margin:14px 0 0"><button type="submit">Check risks</button></p>
+  </form>
+
+  {% if result %}
+  {% if result.unknown %}<div class="card"><h2 class="warn">Not recognised</h2>
+    {% for u in result.unknown %}<p style="margin:6px 0"><b>{{ u.text }}</b>
+      {% if u.suggestions %}: did you mean
+        {% for s in u.suggestions %}<button type="button" class="ghost" style="padding:2px 10px;margin:2px"
+          data-field="{{ u.field }}" data-from="{{ u.text }}" data-to="{{ s }}" onclick="useSuggestion(this)">{{ s }}</button>{% endfor %}?
+      {% else %}<span class="hint">: no close match in the data.</span>{% endif %}</p>{% endfor %}
+  </div>{% endif %}
+
+  <div class="card">
+    <div class="grid">
+      <div><div class="hint">Overall risk score</div><div class="score">{{ result.score }}</div>
+        <div class="hint">{{ result.findings | length }} findings. Major = 3, moderate = 2, minor = 1 point each.</div></div>
+      <div><div class="hint">Recognised as</div>
+        {% for m in result.medicines %}<div>{% if m.input | lower != m.label | lower %}<span class="hint">{{ m.input }} →</span> {% endif %}<b>{{ m.label }}</b>{% if m.kind == 'brand' %}: {{ m.drugs | map(attribute='name') | join(', ') }}{% endif %}{% if m.incomplete %}<br><span class="warn">Composition may be incomplete: the name lists more strengths than the data has ingredients. Check the pack and add the missing ingredient as its own line.</span>{% endif %}</div>{% endfor %}
+        {% for c in result.conditions %}<span class="pill" title="{{ c.members | join(', ') }}">{% if c.input | lower != c.name | lower %}{{ c.input }} → {% endif %}{{ c.name }}{% if c.members | length > 1 %} (+{{ c.members | length - 1 }} related){% endif %}</span>{% endfor %}</div>
+    </div>
+  </div>
+
+  <div class="card"><h2>Risks, most serious first</h2>
+    {% if result.findings %}
+    <table><tr><th>Points</th><th>Type</th><th>Finding and graph path</th></tr>
+    {% for f in result.findings %}
+      <tr><td class="w{{ f.weight }}">{{ f.weight }}</td><td>{{ f.kind }}</td>
+          <td>{{ f.title }}<br><code>{{ f.path }}</code></td></tr>
+    {% endfor %}</table>
+    {% else %}<p class="good">No risks found in this list.</p>{% endif %}
+  </div>
+
+  {% if result.coverage %}
+  <div class="card"><h2>What the data could not check</h2>
+    <ul>{% for n in result.coverage %}<li class="hint">{{ n }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  {% if result.cascades %}
+  <div class="card"><h2>Possible prescribing cascades (for review, not scored)</h2>
+    <p class="hint">A medicine may have been prescribed to treat a side effect of another one in the list.</p>
+    <ul>{% for f in result.cascades %}<li>{{ f.title }}<br><code>{{ f.path }}</code></li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  <div class="grid">
+    <div class="card"><h2>Safer alternatives</h2>
+      {% if result.deprescribe %}<p>Stopping <b>{{ result.deprescribe[1] }}</b> would remove the most risk ({{ result.deprescribe[0] }} points). Discuss with the doctor.</p>{% endif %}
+      {% for a in result.alternatives %}
+        <p style="margin:10px 0 4px">Instead of <b>{{ a.drug }}</b>:</p>
+        {% if a.options %}<ul>{% for o in a.options %}
+          <li>{{ o.name }} <span class="hint">(also treats {{ o.treats_same | join(', ') }})</span>
+            {% if o.generic %}<br><span class="good">Jan Aushadhi: {{ o.generic.name }}, {% if o.generic.price %}₹{{ o.generic.price }}{% else %}price not listed{% endif %}</span>{% endif %}</li>
+        {% endfor %}</ul>{% else %}<p class="hint">No safer option found in the data.</p>{% endif %}
+      {% else %}{% if not result.deprescribe %}<p class="hint">Nothing serious to replace.</p>{% endif %}{% endfor %}
+    </div>
+    <div class="card"><h2>Alcohol</h2>
+      {% if result.alcohol %}<ul>{% for a in result.alcohol %}<li>{{ a.drug }}: <span class="{{ 'w3' if a.severity == 'Major' else 'w2' if a.severity == 'Moderate' else 'w1' }}">{{ a.severity }}</span></li>{% endfor %}</ul>
+      {% else %}<p class="good">No known alcohol interactions.</p>{% endif %}
+      {% if result.what_if %}<h2 style="margin-top:16px">What if {{ result.what_if.medicine }} is added?</h2>
+        <p>Risk score {{ result.what_if.before }} → <b>{{ result.what_if.after }}</b></p>
+        <ul>{% for f in result.what_if.new %}<li class="w{{ f.weight }}">{{ f.title }}</li>{% else %}<li class="good">Adds no new risk.</li>{% endfor %}</ul>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="card"><h2>Medicines with the most interactions (Graph Data Science)</h2>
+    <table><tr><th>Medicine</th><th>Weighted interaction score</th><th>Major interactions</th></tr>
+    {% for r in top_risk %}<tr><td>{{ r.name }}</td><td>{{ r.risk_score }}</td><td>{{ r.major }}</td></tr>{% endfor %}</table>
+  </div>
+</main>
+<script>
+  // "Did you mean": replace the unrecognised line with the chosen suggestion and check again
+  function useSuggestion(btn) {
+    const field = document.getElementById(btn.dataset.field);
+    if (field.tagName === "TEXTAREA") {
+      field.value = field.value.split("\n").map(l => l.trim() === btn.dataset.from ? btn.dataset.to : l).join("\n");
+    } else {
+      field.value = btn.dataset.to;
+    }
+    field.form.submit();
+  }
+  function addLine(inputId, areaId) {
+    const input = document.getElementById(inputId), area = document.getElementById(areaId);
+    if (!input.value.trim()) return;
+    area.value = (area.value.trim() ? area.value.trim() + "\n" : "") + input.value.trim();
+    input.value = "";
+  }
+  function autocomplete(inputId, listId, kind) {
+    const input = document.getElementById(inputId), list = document.getElementById(listId);
+    let timer;
+    input.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        const res = await fetch(`/api/suggest?kind=${kind}&q=${encodeURIComponent(input.value)}`);
+        list.replaceChildren(...(await res.json()).map(n => Object.assign(document.createElement("option"), {value: n})));
+      }, 200);
+    });
+    input.addEventListener("keydown", e => { if (e.key === "Enter" && inputId !== "new_medicine") { e.preventDefault(); addLine(inputId, inputId === "med-in" ? "medicines" : "conditions"); } });
+  }
+  autocomplete("med-in", "med-list", "medicine");
+  autocomplete("cond-in", "cond-list", "condition");
+  autocomplete("new_medicine", "med-list2", "medicine");
+</script>
+</body>
+</html>
