@@ -141,6 +141,39 @@ def main():
     r = analyse(["Zerodol-SP", "warfarin"], ["kidney"])
     check("drugs with no interaction data are reported, not silently scored 0",
           any("No interaction data for aceclofenac" in n for n in r["coverage"]), r["coverage"])
+    print("--- risk level")
+    level = lambda *w: queries.risk_level([{"weight": x} for x in w])["level"]
+    check("one serious finding is Critical however small the total", level(3) == "Critical", level(3))
+    check("many minor findings stay Low however large the total", level(*[1] * 12) == "Low", level(*[1] * 12))
+    check("levels step Moderate -> High -> None found",
+          (level(2, 1), level(2, 2), level()) == ("Moderate", "High", "None found"), (level(2, 1), level(2, 2), level()))
+    r = analyse(["clozapine", "ozanimod", "citalopram"])
+    check("three major interactions give Critical", r["level"]["level"] == "Critical" and r["score"] == 9, (r["level"], r["score"]))
+    print("--- plain-language explanations")
+    names = sorted({n for g in queries.EFFECT_GROUPS for n in g["names"]})
+    missing = [r["n"] for r in d.execute_query(
+        "UNWIND $n AS n WITH n WHERE NOT EXISTS { MATCH (:Drug {name_lower: n}) } RETURN n", n=names).records]
+    check("every drug named in EFFECT_GROUPS exists in the graph", not missing, missing)
+    titles = lambda f: [g["title"] for g in f["effects"]]
+    r = analyse(["clozapine", "ozanimod", "citalopram"])
+    check("every finding says what it means", all(f["meaning"] for f in r["findings"] + r["cascades"]))
+    check("QT drugs explained as a heart rhythm risk", all("Heart rhythm" in titles(f) for f in r["findings"]),
+          [titles(f) for f in r["findings"]])
+    check("three heart-rhythm drugs flagged as adding up", [s["group"]["id"] for s in r["stacked"]] == ["heart_rhythm"],
+          r["stacked"])
+    alcohol = {a["drug"]: [g["id"] for g in a["effects"]] for a in r["alcohol"]}
+    check("clozapine + alcohol explained as drowsiness", "drowsiness" in alcohol.get("clozapine", []), alcohol)
+    r = analyse(["Brufen 400", "Dolo 650"])
+    check("no made-up reason for ibuprofen + paracetamol (noisy side effects ignored)",
+          all(not f["effects"] for f in r["findings"]), [titles(f) for f in r["findings"]])
+    alcohol = {a["drug"]: [g["id"] for g in a["effects"]] for a in r["alcohol"]}
+    check("paracetamol + alcohol explained as liver strain only", alcohol.get("paracetamol") == ["liver"], alcohol)
+    r = analyse(["Brufen 400", "Telma 40", "Lasix"])
+    check("painkiller + BP medicine + water pill flagged as kidney strain adding up",
+          "kidney" in [s["group"]["id"] for s in r["stacked"]], r["stacked"])
+    r = analyse(["amlodipine", "telmisartan", "hydrochlorothiazide"])
+    check("three blood pressure medicines are not a low-BP warning (normal treatment)",
+          "low_bp" not in [s["group"]["id"] for s in r["stacked"]], r["stacked"])
     top = queries.top_risk_medicines(d, 5)
     check("GDS risk ranking is populated", len(top) == 5 and top[0]["risk_score"] > 1000, top[:2])
     d.close()

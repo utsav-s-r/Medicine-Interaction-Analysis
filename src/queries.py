@@ -11,7 +11,7 @@ from collections import defaultdict
 from functools import lru_cache
 
 from config import ROOT
-from curated import CASCADE_RULES, CONDITION_GROUPS
+from curated import CASCADE_RULES, CONDITION_GROUPS, ALCOHOL_MEANING, EFFECT_GROUPS, SEVERITY_MEANING
 from prepare_data import DrugResolver
 
 SEVERITY_WEIGHT = {"Major": 3, "Moderate": 2, "Minor": 1, "Unknown": 1}
@@ -176,6 +176,28 @@ def did_you_mean(driver, text, kind="medicine", limit=3):
 
 # ---------------------------------------------------------------- the checks
 
+def _effect_profile(driver, keys):
+    """drug key -> the curated effect groups it belongs to (most dangerous first), by class, name or side effect."""
+    side_effects = sorted({s for g in EFFECT_GROUPS for s in g["side_effects"]})
+    profile = {}
+    for r in driver.execute_query("""
+            MATCH (d:Drug) WHERE d.key IN $k
+            RETURN d.key AS key, d.name_lower AS name, coalesce(d.atc_classes, []) AS atc,
+                   coalesce(d.is_alcohol, false) AS alcohol,
+                   [(d)-[:CAUSES]->(s:SideEffect) WHERE s.name IN $se | s.name] AS se""",
+            k=keys, se=side_effects).records:
+        profile[r["key"]] = [g for g in EFFECT_GROUPS
+                             if (r["alcohol"] and g["alcohol"]) or r["name"] in g["names"]
+                             or any(c.startswith(p) for c in r["atc"] for p in g["atc"])
+                             or set(r["se"]) & set(g["side_effects"])]
+    return profile
+
+
+def _shared_effects(profile, a, b, limit=2):
+    """The likely reason two drugs clash: effect groups both belong to, most dangerous first."""
+    return [g for g in profile.get(a, []) if g in profile.get(b, [])][:limit]
+
+
 def _findings(driver, meds, conditions):
     """All risks inside one medicine list. meds: resolved medicines; conditions: resolved conditions."""
     owner = defaultdict(set)            # drug key -> indexes of the medicines that contain it
@@ -184,11 +206,14 @@ def _findings(driver, meds, conditions):
             owner[d["key"]].add(i)
     keys = list(owner)
     condition_of = {k: c["name"] for c in conditions for k in c["keys"]}
+    profile = _effect_profile(driver, keys)
     found = []
 
-    def add(kind, weight, title, path, drugs):
+    def add(kind, weight, title, path, drugs, meaning, effects=()):
+        """meaning: what the finding means to a patient; effects: what can happen and what to watch for."""
         inputs = sorted({i for k in drugs for i in owner[k]})
-        found.append({"kind": kind, "weight": weight, "title": title, "path": path, "inputs": inputs, "drugs": drugs})
+        found.append({"kind": kind, "weight": weight, "title": title, "path": path, "inputs": inputs, "drugs": drugs,
+                      "meaning": meaning, "effects": list(effects)})
 
     # 1. Direct drug-drug interactions (DDInter)
     for r in driver.execute_query("""
@@ -198,7 +223,8 @@ def _findings(driver, meds, conditions):
         if owner[r["ak"]] == owner[r["bk"]] and len(owner[r["ak"]]) == 1:
             continue    # both ingredients of the same combination product: intended by the maker
         add("Drug interaction", SEVERITY_WEIGHT[r["severity"]], f"{r['a']} + {r['b']}: {r['severity']} interaction",
-            f"({r['a']})-[INTERACTS_WITH {{{r['severity']}}}]-({r['b']})", [r["ak"], r["bk"]])
+            f"({r['a']})-[INTERACTS_WITH {{{r['severity']}}}]-({r['b']})", [r["ak"], r["bk"]],
+            SEVERITY_MEANING[r["severity"]], _shared_effects(profile, r["ak"], r["bk"]))
 
     # 2a. Hidden interactions through a shared liver enzyme (only where no direct record exists)
     for r in driver.execute_query("""
@@ -208,10 +234,14 @@ def _findings(driver, meds, conditions):
                    b.key AS bk, b.name AS b, m.sensitivity AS sensitivity""", k=keys).records:
         verb = "blocks" if r["effect"] == "INHIBITS" else "speeds up"
         outcome = "can build up to unsafe levels" if r["effect"] == "INHIBITS" else "can stop working"
+        meaning = (f"The liver enzyme {r['enzyme']} breaks down {r['b']}. {r['a']} slows it down, so {r['b']} can build "
+                   f"up in the body and its side effects can get stronger." if r["effect"] == "INHIBITS" else
+                   f"The liver enzyme {r['enzyme']} breaks down {r['b']}. {r['a']} speeds it up, so {r['b']} is cleared "
+                   f"faster and may not work as well as it should.")
         add("Hidden enzyme interaction", ENZYME_WEIGHT[r["strength"]],
             f"{r['a']} {verb} {r['enzyme']}, which clears {r['b']}: {r['b']} {outcome}",
             f"({r['a']})-[{r['effect']} {{{r['strength']}}}]->({r['enzyme']})<-[METABOLISED_BY]-({r['b']})",
-            [r["ak"], r["bk"]])
+            [r["ak"], r["bk"]], meaning)
 
     # 2b. Duplicate ingredients: the same drug inside two different medicines
     names = {d["key"]: d["name"] for m in meds for d in m["drugs"]}
@@ -219,7 +249,9 @@ def _findings(driver, meds, conditions):
         if len(idx) > 1:
             labels = " and ".join(meds[i]["label"] for i in sorted(idx))
             add("Duplicate ingredient", 3, f"{names[k]} is taken twice: in {labels}",
-                f"({labels})-[CONTAINS]->({names[k]})", [k])
+                f"({labels})-[CONTAINS]->({names[k]})", [k],
+                f"Both medicines contain {names[k]}, so together they double the dose, which can lead to an overdose. "
+                f"Usually only one of them should be taken.")
 
     # 2c. Two different drugs of the same drug class (ATC level 4) from different medicines
     for r in driver.execute_query("""
@@ -229,7 +261,9 @@ def _findings(driver, meds, conditions):
         if owner[r["ak"]] & owner[r["bk"]]:
             continue
         add("Same drug class", 1, f"{r['a']} and {r['b']} are the same type of medicine (class {r['shared'][0]})",
-            f"({r['a']})-[class {r['shared'][0]}]-({r['b']})", [r["ak"], r["bk"]])
+            f"({r['a']})-[class {r['shared'][0]}]-({r['b']})", [r["ak"], r["bk"]],
+            "Two medicines that do the same job: their effects and side effects add up, and one is often enough.",
+            _shared_effects(profile, r["ak"], r["bk"]))
 
     # 3. Medicines unsafe for the patient's existing conditions (DrugCentral), one warning per drug and condition
     unsafe = defaultdict(list)
@@ -241,7 +275,9 @@ def _findings(driver, meds, conditions):
         unsafe[(r["dk"], r["d"], condition_of[r["ck"]])].append(r["recorded"])
     for (dk, d, condition), recorded in unsafe.items():
         add("Unsafe for patient's condition", 3, f"{d} should not be used with {condition.lower()}",
-            f"({d})-[CONTRAINDICATED_IN]->({' / '.join(recorded[:2])})", [dk])
+            f"({d})-[CONTRAINDICATED_IN]->({' / '.join(recorded[:2])})", [dk],
+            f"{d} is recorded as harmful for people with {condition.lower()}: it can make the condition worse "
+            f"or cause complications.")
 
     # 4. Prescribing cascades: A causes a side effect that B (also taken) is used to treat.
     #    Only textbook patterns (curated.CASCADE_RULES), and only when the graph has both edges.
@@ -266,7 +302,9 @@ def _findings(driver, meds, conditions):
     for (ak, bk), c in sorted(cascades.items(), key=lambda kv: -len(kv[1]["effects"]))[:MAX_CASCADES]:
         add("Possible prescribing cascade", 0,
             f"{c['b']} may only be needed because {c['a']} can cause {' and '.join(c['effects'][:3])}",
-            c["paths"][0], [ak, bk])
+            c["paths"][0], [ak, bk],
+            f"If {c['b']} was started to treat a side effect of {c['a']}, changing {c['a']} may be better "
+            f"than adding another medicine.")
     return found, owner
 
 
@@ -300,10 +338,28 @@ def _coverage(driver, meds, conditions, findings):
     return notes
 
 
-def _alcohol(driver, keys):
-    return [r.data() for r in driver.execute_query("""
+def risk_level(findings):
+    """A band from the worst finding, not the total, so one serious risk is never diluted by a small sum
+    and a long list of minor ones never looks alarming."""
+    weights = [f["weight"] for f in findings]
+    if 3 in weights:
+        return {"level": "Critical", "css": "w3", "why": f"{weights.count(3)} serious finding{'s' * (weights.count(3) > 1)}"}
+    if weights.count(2) >= 2:
+        return {"level": "High", "css": "w2", "why": f"{weights.count(2)} moderate findings"}
+    if 2 in weights:
+        return {"level": "Moderate", "css": "w2", "why": "1 moderate finding"}
+    if weights:
+        return {"level": "Low", "css": "w1", "why": "minor findings only"}
+    return {"level": "None found", "css": "good", "why": "no risks found in the data"}
+
+
+def _alcohol(driver, keys, profile):
+    """Medicines that clash with alcohol, with what to do and what can happen."""
+    return [{**r.data(), "meaning": ALCOHOL_MEANING[r["severity"]],
+             "effects": [g for g in profile.get(r["key"], []) if g["alcohol"]][:2]}
+            for r in driver.execute_query("""
         MATCH (d:Drug)-[x:INTERACTS_WITH]-(:Drug {is_alcohol: true}) WHERE d.key IN $k
-        RETURN d.name AS drug, x.severity AS severity
+        RETURN d.key AS key, d.name AS drug, x.severity AS severity
         ORDER BY CASE x.severity WHEN 'Major' THEN 0 WHEN 'Moderate' THEN 1 ELSE 2 END""", k=keys).records]
 
 
@@ -382,14 +438,25 @@ def analyse(driver, medicine_texts, condition_texts, new_medicine=None):
             new_score = sum(f["weight"] for f in new_findings)
             existing = {f["title"] for f in findings}
             what_if = {"medicine": extra["label"], "before": score, "after": new_score,
+                       "level_before": risk_level(findings),
+                       "level_after": risk_level([f for f in new_findings if f["weight"] > 0]),
                        "new": sorted((f for f in new_findings if f["weight"] > 0 and f["title"] not in existing),
                                      key=lambda f: -f["weight"])}
         else:
             not_found(new_medicine, "medicine", "new_medicine")
 
+    # Effects that add up across the whole list: 3+ different medicines doing the same risky thing,
+    # which no pairwise check can show
+    profile = _effect_profile(driver, keys)
+    stacked = []
+    for g in (g for g in EFFECT_GROUPS if g["stack"]):
+        members = [k for k in keys if g in profile.get(k, [])]
+        if len({i for k in members for i in owner[k]}) >= 3:
+            stacked.append({"group": g, "drugs": [names[k] for k in members]})
+
     risk = {r["name"]: r["risk_score"] for r in driver.execute_query(
         "MATCH (d:Drug) WHERE d.key IN $k RETURN d.name AS name, toInteger(d.risk_score) AS risk_score",
         k=keys).records}
-    return {"medicines": meds, "conditions": conditions, "unknown": unknown, "score": score,
-            "findings": findings, "cascades": cascades, "coverage": _coverage(driver, meds, conditions, findings), "alcohol": _alcohol(driver, keys), "alternatives": alternatives,
+    return {"medicines": meds, "conditions": conditions, "unknown": unknown, "score": score, "level": risk_level(findings),
+            "findings": findings, "cascades": cascades, "coverage": _coverage(driver, meds, conditions, findings), "alcohol": _alcohol(driver, keys, profile), "stacked": stacked, "alternatives": alternatives,
             "deprescribe": deprescribe, "what_if": what_if, "drug_risk": risk}

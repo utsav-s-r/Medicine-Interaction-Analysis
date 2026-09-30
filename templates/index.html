@@ -34,6 +34,15 @@
   .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line); font-size: 13px; margin: 2px 4px 2px 0; }
   .good { color: var(--good); } .warn { color: var(--moderate); }
   ul { margin: 0; padding-left: 18px; }
+  .meaning { margin: 4px 0 0; }
+  .effect { margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--line); background: var(--bg); border-radius: 8px; }
+  .effect b { color: var(--text); } .effect.w3 b { color: var(--major); } .effect.w2 b { color: var(--moderate); }
+  .effect p { margin: 2px 0 0; font-weight: 400; color: var(--text); }
+  @media (max-width: 720px) {   /* findings: points and type on one line, the explanation full width below */
+    .findings tr:first-child { display: none; }
+    .findings tr { display: grid; grid-template-columns: auto 1fr; column-gap: 10px; border-top: 1px solid var(--line); padding: 8px 0; }
+    .findings td { border: 0; padding: 0; } .findings td:nth-child(3) { grid-column: 1 / -1; margin-top: 4px; } }
+  .note { padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; margin: 0 0 12px; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -65,6 +74,9 @@
     <p style="margin:14px 0 0"><button type="submit">Check risks</button></p>
   </form>
 
+  {% macro effects(list, css) %}{% for g in list %}<div class="effect {{ css }}"><b>{{ g.title }}</b>
+    <p>{{ g.what }}</p><p><span class="hint">Watch for:</span> {{ g.watch }}</p></div>{% endfor %}{% endmacro %}
+
   {% if result %}
   {% if result.unknown %}<div class="card"><h2 class="warn">Not recognised</h2>
     {% for u in result.unknown %}<p style="margin:6px 0"><b>{{ u.text }}</b>
@@ -76,21 +88,41 @@
 
   <div class="card">
     <div class="grid">
-      <div><div class="hint">Overall risk score</div><div class="score">{{ result.score }}</div>
-        <div class="hint">{{ result.findings | length }} findings. Major = 3, moderate = 2, minor = 1 point each.</div></div>
+      <div><div class="hint">Overall risk level</div><div class="score {{ result.level.css }}">{{ result.level.level }}</div>
+        <div>{{ result.level.why }}</div>
+        <div class="hint">Total score {{ result.score }} from {{ result.findings | length }} findings (serious = 3, moderate = 2, minor = 1 point each).
+          The level follows the worst finding; the score is for comparing lists.</div></div>
       <div><div class="hint">Recognised as</div>
         {% for m in result.medicines %}<div>{% if m.input | lower != m.label | lower %}<span class="hint">{{ m.input }} →</span> {% endif %}<b>{{ m.label }}</b>{% if m.kind == 'brand' %}: {{ m.drugs | map(attribute='name') | join(', ') }}{% endif %}{% if m.incomplete %}<br><span class="warn">Composition may be incomplete: the name lists more strengths than the data has ingredients. Check the pack and add the missing ingredient as its own line.</span>{% endif %}</div>{% endfor %}
         {% for c in result.conditions %}<span class="pill" title="{{ c.members | join(', ') }}">{% if c.input | lower != c.name | lower %}{{ c.input }} → {% endif %}{{ c.name }}{% if c.members | length > 1 %} (+{{ c.members | length - 1 }} related){% endif %}</span>{% endfor %}</div>
     </div>
   </div>
 
+  {% if result.stacked %}
+  <div class="card"><h2>Effects that add up across the whole list</h2>
+    <p class="hint">Three or more medicines each do the same risky thing. The more of them, the bigger the risk,
+      even when no single pair looks serious.</p>
+    {% for s in result.stacked %}<div class="effect w3"><b>{{ s.group.title }}: {{ s.drugs | join(', ') }}</b>
+      <p>{{ s.group.what | replace('Both', 'All of these') }}</p>
+      <p><span class="hint">Watch for:</span> {{ s.group.watch }}</p></div>{% endfor %}
+  </div>
+  {% endif %}
+
   <div class="card"><h2>Risks, most serious first</h2>
     {% if result.findings %}
-    <table><tr><th>Points</th><th>Type</th><th>Finding and graph path</th></tr>
+    <p class="note">Do not stop or change any medicine on your own: stopping suddenly can be dangerous too.
+      Show this list to the doctor or pharmacist who prescribed them.</p>
+    <table class="findings"><tr><th>Points</th><th>Type</th><th>What was found, what it means, what to watch for</th></tr>
     {% for f in result.findings %}
       <tr><td class="w{{ f.weight }}">{{ f.weight }}</td><td>{{ f.kind }}</td>
-          <td>{{ f.title }}<br><code>{{ f.path }}</code></td></tr>
+          <td><b>{{ f.title }}</b>
+            <p class="meaning">{{ f.meaning }}</p>
+            {{ effects(f.effects, 'w' ~ f.weight) }}
+            <code>{{ f.path }}</code></td></tr>
     {% endfor %}</table>
+    <p class="hint" style="margin-top:10px">The interaction data (DDInter) only says how serious a pair is. The
+      "what can happen" boxes are worked out from what kind of medicine each one is (its drug class), so they are the
+      likely reason, not a diagnosis. A pharmacist can confirm the exact reason.</p>
     {% else %}<p class="good">No risks found in this list.</p>{% endif %}
   </div>
 
@@ -103,7 +135,7 @@
   {% if result.cascades %}
   <div class="card"><h2>Possible prescribing cascades (for review, not scored)</h2>
     <p class="hint">A medicine may have been prescribed to treat a side effect of another one in the list.</p>
-    <ul>{% for f in result.cascades %}<li>{{ f.title }}<br><code>{{ f.path }}</code></li>{% endfor %}</ul>
+    <ul>{% for f in result.cascades %}<li>{{ f.title }}<p class="meaning hint">{{ f.meaning }}</p><code>{{ f.path }}</code></li>{% endfor %}</ul>
   </div>
   {% endif %}
 
@@ -119,11 +151,18 @@
       {% else %}{% if not result.deprescribe %}<p class="hint">Nothing serious to replace.</p>{% endif %}{% endfor %}
     </div>
     <div class="card"><h2>Alcohol</h2>
-      {% if result.alcohol %}<ul>{% for a in result.alcohol %}<li>{{ a.drug }}: <span class="{{ 'w3' if a.severity == 'Major' else 'w2' if a.severity == 'Moderate' else 'w1' }}">{{ a.severity }}</span></li>{% endfor %}</ul>
+      {% if result.alcohol %}{% for a in result.alcohol %}{% set css = 'w3' if a.severity == 'Major' else 'w2' if a.severity == 'Moderate' else 'w1' %}
+        <p style="margin:12px 0 0"><b>{{ a.drug }}</b> with alcohol: <span class="{{ css }}">{{ a.severity }}</span></p>
+        <p class="meaning">{{ a.meaning }}</p>
+        {{ effects(a.effects, css) | replace('Both', 'The medicine and alcohol both') }}{% endfor %}
       {% else %}<p class="good">No known alcohol interactions.</p>{% endif %}
       {% if result.what_if %}<h2 style="margin-top:16px">What if {{ result.what_if.medicine }} is added?</h2>
-        <p>Risk score {{ result.what_if.before }} → <b>{{ result.what_if.after }}</b></p>
-        <ul>{% for f in result.what_if.new %}<li class="w{{ f.weight }}">{{ f.title }}</li>{% else %}<li class="good">Adds no new risk.</li>{% endfor %}</ul>
+        <p>Risk level <span class="{{ result.what_if.level_before.css }}">{{ result.what_if.level_before.level }}</span> →
+          <b class="{{ result.what_if.level_after.css }}">{{ result.what_if.level_after.level }}</b>
+          <span class="hint">(score {{ result.what_if.before }} → {{ result.what_if.after }})</span></p>
+        {% for f in result.what_if.new %}<p style="margin:10px 0 0" class="w{{ f.weight }}">{{ f.title }}</p>
+          <p class="meaning">{{ f.meaning }}</p>{{ effects(f.effects, 'w' ~ f.weight) }}
+        {% else %}<p class="good">Adds no new risk.</p>{% endfor %}
       {% endif %}
     </div>
   </div>

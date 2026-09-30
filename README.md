@@ -69,7 +69,7 @@ Only needed after changing the data or the scripts (about 1 minute):
 ## Check nothing broke
 
 Run after any change to the data, the queries or `src/curated.py` (about 5 seconds, read-only, needs Neo4j running).
-It prints PASS/FAIL for 54 checks and ends with a count:
+It prints PASS/FAIL for 67 checks and ends with a count:
 
 ```bash
 .venv/bin/python tests/run_regression.py
