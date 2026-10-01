@@ -366,6 +366,38 @@ def main():
     check("unsafe medicines in the most Indian brands come first", brands == sorted(brands, reverse=True), brands)
     check("the Beers rule about heart failure is attached",
           [n["props"]["key"] for n in cv["nodes"] if n.get("parent") == "beers"] == ["BEERS:T3-heart-failure"])
+    print("--- fixes from app testing")
+    dup_titles = lambda r: [f["title"] for f in r["findings"] if f["kind"] == "Duplicate ingredient"]
+    twice = analyse(["warfarin", "Warfarin"], ["kidney", "ckd"])
+    check("the same medicine or condition entered twice is counted once, not reported as a double dose",
+          [m["label"] for m in twice["medicines"]] == ["warfarin"] and len(twice["conditions"]) == 1 and not dup_titles(twice)
+          and twice["repeated"] == ["Warfarin", "ckd"], twice["repeated"])
+    three = dup_titles(analyse(["Dolo 650", "Calpol 500", "Crocin Advance"]))
+    check("three medicines with the same ingredient say so ('3 times'), not 'twice'",
+          three and three[0].startswith("paracetamol is taken 3 times"), three)
+    again = queries.analyse(d, ["warfarin"], [], "warfarin")["what_if"]
+    check("'what if' with a medicine already on the list says it is already there", again == {"medicine": "warfarin",
+                                                                                            "already": True}, again)
+    page = queries.about_brands(d, [{"brand_key": "IN:58235"}])[0]              # Dolo 650 on the check page
+    view = explore.profile(d, "Brand", "IN:58235")
+    check("the check page and the brand view list the same cheapest same-medicine brands",
+          [x["name"] for x in page["subs"]] == [n["props"]["name"] for n in view["nodes"] if n.get("parent") == "same"][:3]
+          and page["same"] == view["summary"]["same"], ([x["name"] for x in page["subs"]], view["summary"]["cheapest"]))
+    print("--- official label shown (oral first)")
+    about = {a["drug"]: a for a in queries.about_medicines(d, [{"drugs": [{"key": "DC:52"}, {"key": "DC:2847"}]}])}
+    para = about.get("paracetamol") or next(iter(about.values()))
+    check("paracetamol shows its oral label, not the injection's uses and boxed warning",
+          para["route"] == "oral" and "injection" not in para["used_for"].lower() and not para["boxed"], para)
+    check("a real boxed warning on an oral label is still shown (warfarin: bleeding risk)",
+          about["warfarin"]["boxed_title"] == "Bleeding risk", about["warfarin"]["boxed_title"])
+    q = [x for x in queries.analyse(d, ["warfarin", "paracetamol"], [])["findings"][0]["label"] if x["drug"] == "paracetamol"]
+    shown_set = d.execute_query("MATCH (:Drug {name: 'paracetamol'})-[:HAS_LABEL]->(l) RETURN l.set_id AS s, "
+                                "l.evidence_set_id AS e").records[0]
+    check("interaction quotes keep coming from the best-documented label, and link to that label",
+          q and shown_set["e"] != shown_set["s"] and all(x["url"].endswith(shown_set["e"]) for x in q), (q, shown_set.data()))
+    packaging = d.execute_query("""MATCH (l:Label) WHERE toLower(l.boxed_warning) CONTAINS 'tamper'
+                                   OR toLower(l.boxed_warning) CONTAINS 'imprinted seal' RETURN count(l) AS n""").records[0]["n"]
+    check("packaging notes in the boxed-warning field are not shown as boxed warnings", packaging == 0, packaging)
     print("--- drug-class map")
     off = d.execute_query("""
         MATCH (x:Drug) UNWIND coalesce(x.atc_classes, []) AS c WITH x, collect(DISTINCT left(c, 3)) AS want

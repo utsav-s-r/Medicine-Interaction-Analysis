@@ -9,7 +9,7 @@ from collections import defaultdict
 from functools import lru_cache
 
 from curated import CONDITION_GROUPS
-from queries import _condition_lookup, _fulltext, _unit_price
+from queries import FORM_WORDS, RELEASE, _condition_lookup, _form, _fulltext, _per_unit, same_medicine
 
 # every relationship type in the graph, as the browser may ask for them
 RELATIONSHIPS = ["CONTAINS", "INTERACTS_WITH", "INHIBITS", "INDUCES", "METABOLISED_BY", "TREATS",
@@ -432,28 +432,6 @@ def class_pair(driver, a, b):
 # Jan Aushadhi generic, and its ban. "The same medicine" is worked out from CONTAINS: exactly the same ingredients
 # at the same strengths, in the same form (tablet, SR tablet, syrup...). The 1mg data's own SUBSTITUTE links are a
 # few of those, kept as real edges.
-FORM = re.compile(r"^\s*\w+ of [\d.]+\s*(?:ml|gm|g|mg|kg|l)?\s*(.*?)\s*$", re.I)
-RELEASE = re.compile(r"\b(sr|er|xr|cr|mr|xl|la|od|cd|retard|prolonged|sustained|extended|modified|controlled)\b", re.I)
-FORM_WORDS = re.compile(r"\b(tablet|capsule|syrup|suspension|injection|infusion|cream|gel|ointment|drops?|solution|"
-                        r"lotion|spray|inhaler|sachet|powder|granules)", re.I)
-
-
-def _form(pack):
-    """'strip of 10 tablet sr' -> 'tablet sr'; 'bottle of 100 ml Syrup' -> 'syrup'."""
-    m = FORM.match(pack or "")
-    return re.sub(r"s\b", "", m.group(1).lower(), count=1) if m else ""
-
-
-def _per_unit(price, pack, name=""):
-    """Price per tablet/capsule: from the pack ("strip of 15 tablets"), or for Jan Aushadhi ("10's") from the name."""
-    unit = _unit_price(price, pack)
-    m = re.match(r"\s*(\d+)\s*'s\s*$", pack or "")
-    word = FORM_WORDS.search(name or "")
-    if not unit and m and price and int(m.group(1)) and word and word.group(1).lower() in ("tablet", "capsule"):
-        unit = (round(price / int(m.group(1)), 2), word.group(1).lower())
-    return unit
-
-
 def _price_text(price, unit):
     return f"₹{unit[0]:.2f}/{unit[1]}" if unit else f"₹{price:.2f}/pack" if price else "no price"
 
@@ -484,27 +462,13 @@ def _brand_view(driver, key):
                              "target": f"ingredients/{e['target']}"})
 
     # the same medicine from other makers: same ingredients, same strengths, same form, still sold, not banned
-    same, listed = [], 0
-    if parts and all(r["r"]["strength"] for r in parts):
-        signature = sorted(f"{r['n']['key']}@{r['r']['strength']}" for r in parts)
-        for r in q("""
-                MATCH (b:Brand {key: $k})-[:CONTAINS]->(first:Drug {key: $first})
-                MATCH (o:Brand {source: 'india_az', discontinued: false})-[:CONTAINS]->(first) WHERE o <> b
-                  AND COUNT { (o)-[:CONTAINS]->() } = $n AND NOT EXISTS { (o)-[:BANNED_UNDER]->() }
-                MATCH (o)-[c:CONTAINS]->(d:Drug)
-                WITH b, o, collect(d.key + '@' + c.strength) AS sig WHERE all(s IN $sig WHERE s IN sig)
-                OPTIONAL MATCH (b)-[r:SUBSTITUTE]-(o)
-                RETURN o AS n, o.name AS name, head(collect(r)) AS r""", first=keys[0], n=len(keys), sig=signature):
-            o = r["n"]
-            if _form(o.get("pack")) != form or set(RELEASE.findall(o.get("name", "").lower())) != release:
-                continue
-            unit = _per_unit(o.get("price"), o.get("pack"), o.get("name"))
-            listed += r["r"] is not None
-            same.append({"n": o, "r": r["r"], "unit": unit, "type": "SAME_MEDICINE",
-                         "name": f"{_price_text(o.get('price'), unit)} · {r['name']}",
-                         "props": {"price": _price_text(o.get("price"), unit), "maker": o.get("manufacturer")}})
+    _, same = same_medicine(driver, key)
+    listed = sum(x["r"] is not None for x in same)
+    for x in same:
+        price = _price_text(x["n"].get("price"), x["unit"])
+        x.update(type="SAME_MEDICINE", name=f"{price} · {x['n']['name']}",
+                 props={"price": price, "maker": x["n"].get("manufacturer")})
     comparable = lambda x: x["unit"] and own_unit and x["unit"][1] == own_unit[1]
-    same.sort(key=lambda x: (not comparable(x), x["unit"][0] if comparable(x) else x["n"].get("price") or 1e9))
     box("same", "Same medicine, other makers", same[:PROFILE_LIMIT["same"]], len(same),
         note=f"same ingredients, strengths and form; cheapest per {own_unit[1] if own_unit else 'pack'} first"
              + (f"; {listed} of them listed as substitutes in the source data" if listed else ""))

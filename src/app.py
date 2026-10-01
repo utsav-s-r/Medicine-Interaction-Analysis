@@ -17,6 +17,10 @@ def _lines(text):
     return [t.strip() for t in (text or "").splitlines() if t.strip()]
 
 
+# the most lines one check takes (the check page and the risk graph alike)
+MAX_MEDICINES, MAX_CONDITIONS = 30, 20
+
+
 def _age(text):
     """A whole number of years from 0 to 120, or None (blank or anything else)."""
     text = (text or "").strip()
@@ -31,7 +35,9 @@ def index():
     age = _age(request.args.get("age"))
     result = None
     if _lines(medicines):
-        result = queries.analyse(driver, _lines(medicines), _lines(conditions), new_medicine, age)
+        meds, conds = _lines(medicines), _lines(conditions)
+        result = queries.analyse(driver, meds[:MAX_MEDICINES], conds[:MAX_CONDITIONS], new_medicine[:200], age)
+        result["cut"] = {"medicines": max(len(meds) - MAX_MEDICINES, 0), "conditions": max(len(conds) - MAX_CONDITIONS, 0)}
     return render_template("index.html", medicines=medicines, conditions=conditions, new_medicine=new_medicine,
                            age=age, result=result, top_risk=queries.top_risk_medicines(driver, 10))
 
@@ -49,7 +55,7 @@ def graph():
     classes: open the drug-class map ("all", or a main group such as "B")."""
     return render_template("graph.html", medicines=_text("medicines", 2000), conditions=_text("conditions", 1000),
                            age=_text("age", 3), finding=_text("finding", 300), q=_text("q", 100),
-                           profile=_text("profile", 120), classes=_text("classes", 3))
+                           profile=_text("profile", 120), classes=_text("classes", 3).upper())
 
 
 @app.get("/api/graph/schema")
@@ -78,10 +84,10 @@ def graph_expand():
 @app.get("/api/graph/risk")
 def graph_risk():
     """The risk graph of a medicine list, checked exactly as on the check page (same medicines, conditions, age)."""
-    medicines = _lines(_text("medicines", 2000))[:30]
+    medicines = _lines(_text("medicines", 2000))[:MAX_MEDICINES]
     if not medicines:
         return jsonify({"nodes": [], "edges": [], "findings": []})
-    result = queries.analyse(driver, medicines, _lines(_text("conditions", 1000))[:20], None, _age(_text("age", 3)))
+    result = queries.analyse(driver, medicines, _lines(_text("conditions", 1000))[:MAX_CONDITIONS], None, _age(_text("age", 3)))
     return jsonify(explore.risk_graph(driver, result))
 
 
@@ -95,7 +101,7 @@ def graph_profile():
 @app.get("/api/graph/classes")
 def graph_classes():
     """The drug-class map: the 14 main groups, or with group=B the classes inside that group."""
-    group = _text("group", 3)
+    group = _text("group", 3).upper()
     if not group:
         return jsonify(explore.class_map(driver))
     found = explore.class_group(driver, group)
@@ -105,7 +111,7 @@ def graph_classes():
 @app.get("/api/graph/class-pair")
 def graph_class_pair():
     """The Major drug pairs between two drug classes (codes like B and M, or B01 and M01)."""
-    found = explore.class_pair(driver, _text("a", 3), _text("b", 3))
+    found = explore.class_pair(driver, _text("a", 3).upper(), _text("b", 3).upper())
     return jsonify(found) if found else abort(404)
 
 

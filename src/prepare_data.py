@@ -280,7 +280,9 @@ def label_sentences(text):
 
 def label_evidence(res, graph_drugs):
     """openFDA labels (data/fda/labels.jsonl.gz): one Label per drug, and the sentences in drug A's label that
-    name drug B ((A)-[:LABEL_MENTIONS]->(B)) or a group B belongs to (kept on the label, matched at query time)."""
+    name drug B ((A)-[:LABEL_MENTIONS]->(B)) or a group B belongs to (kept on the label, matched at query time).
+    The Label shows the label for the way the drug is taken (oral when there is one); the sentences come from the
+    best-documented label, which can be another (lab["evidence"]), and its set_id is kept as evidence_set_id."""
     labels, mentions = [], {}
     with gzip.open(DATA / "fda/labels.jsonl.gz", "rt", encoding="utf-8") as fh:
         for line in fh:
@@ -288,9 +290,10 @@ def label_evidence(res, graph_drugs):
             a, sections = lab["drug"], lab["sections"]
             if a not in graph_drugs:
                 continue
+            evidence = lab.get("evidence", lab)
             class_notes = []
             for section in EVIDENCE_SECTIONS:
-                for sentence in label_sentences(sections.get(section, "")):
+                for sentence in label_sentences(evidence["sections"].get(section, "")):
                     words = re.findall(r"[a-z0-9][a-z0-9'\-]*", sentence.lower())
                     named = set()
                     for n in (1, 2, 3, 4):
@@ -310,7 +313,7 @@ def label_evidence(res, graph_drugs):
             labels.append((a, lab["set_id"], lab["effective"], lab["substance"], lab["brand"],
                            *(sections.get(k, "") for k in ("boxed_warning", "indications_and_usage", "contraindications",
                                                            "information_for_patients", "geriatric_use", "pregnancy")),
-                           json.dumps(class_notes, ensure_ascii=False)))
+                           json.dumps(class_notes, ensure_ascii=False), lab.get("route", ""), evidence["set_id"]))
     return labels, [(a, b, json.dumps(t, ensure_ascii=False)) for (a, b), t in sorted(mentions.items())]
 
 
@@ -564,7 +567,8 @@ def main():
     # --- openFDA labels: what the official label says, and which other medicines each label warns about
     labels, mentions = label_evidence(res, drug_names)
     write_csv("labels.csv", ["drug", "set_id", "effective", "substance", "brand", "boxed_warning", "indications",
-                             "contraindications", "patient_info", "geriatric_use", "pregnancy", "class_notes"], labels)
+                             "contraindications", "patient_info", "geriatric_use", "pregnancy", "class_notes",
+                             "route", "evidence_set_id"], labels)
     write_csv("label_mentions.csv", ["a", "b", "sentences"], mentions)
 
     # --- TWOSIDES: side effects reported far more often when two drugs are taken together (FDA reports)

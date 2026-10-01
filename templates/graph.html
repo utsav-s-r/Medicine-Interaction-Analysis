@@ -366,7 +366,7 @@ function showEdge(e) {
 }
 
 // ------------------------------------------------------------------ risk view: the warnings of a medicine list
-let risk = null, riskPositions = null, focused = null;
+let risk = null, riskPositions = null, focused = null, riskLoading = null;   // riskLoading: one fetch at a time
 const KIND_SHORT = f => f.kind === "Possible prescribing cascade" ? "cascade" : f.weight;
 function riskElements() {
   return [...risk.nodes.map(n => ({ group: "nodes", data: { ...n, props: {}, short: short(n.name) } })),
@@ -389,6 +389,7 @@ async function loadRisk() {
   $("findingList").replaceChildren(...risk.findings.map(f => el("button", { type: "button", "data-index": f.index,
       onclick: () => focusFinding(f.index) },
     el("span", { class: `points w${f.weight}` }, KIND_SHORT(f)), el("span", {}, f.title))));
+  if (mode !== "risk") { status(""); return; }   // left the tab while it loaded: drawn when the tab is opened again
   const wanted = risk.findings.find(f => f.title === START.finding);
   showRiskGraph(!wanted);               // opening on one warning: place the whole graph at once, animate only the path
   if (wanted) focusFinding(wanted.index);
@@ -477,7 +478,7 @@ function showRiskEdge(e) {
 $("showAll").addEventListener("click", showAllFindings);
 
 // ------------------------------------------------------------------ profile view: a drug's profile or an enzyme's hub
-let profileData = null, profileTrail = [];
+let profileData = null, profileTrail = [], profileRequest = 0;
 // which relationship types each box holds, for "see all in Explore"
 const BOX_TYPES = { enzymes: ["INHIBITS", "INDUCES", "METABOLISED_BY"], interactions: ["INTERACTS_WITH"],
   treats: ["TREATS"], unsafe: ["CONTRAINDICATED_IN"], beers: ["FLAGGED_BY"], label: ["HAS_LABEL"],
@@ -489,9 +490,12 @@ async function openProfile(label, key, { remember = true } = {}) {
   if (remember && profileData) profileTrail.push([profileData.center.label, profileKey(profileData.center)]);
   showMode("profile", { load: false });
   status("Loading the profile…");
+  const request = ++profileRequest;
   try {
-    profileData = await api("/api/graph/profile", { label, key });
-    renderProfile();
+    const data = await api("/api/graph/profile", { label, key });
+    if (request !== profileRequest) return;        // a newer profile was asked for meanwhile
+    profileData = data;
+    if (mode === "profile") renderProfile(); else status("");   // otherwise drawn when the tab is opened again
   } catch (err) { status(err.message); }
 }
 function renderProfile() {
@@ -748,6 +752,7 @@ $("classCount").addEventListener("change", () => classMap && drawClasses());
 // ------------------------------------------------------------------ schema view
 async function showSchema() {
   const s = await api("/api/graph/schema");
+  if (mode !== "schema") return;                 // another tab was opened while it loaded
   cy.elements().remove();
   cy.add(s.labels.map(l => ({ group: "nodes", data: { id: "L:" + l.label, label: l.label, name: l.label,
     short: `${l.label} (${l.count.toLocaleString()})`, props: { count: l.count } } })));
@@ -782,7 +787,7 @@ function showMode(next, { load = true } = {}) {
       cy.elements().remove(); $("empty").hidden = false;
       $("details").replaceChildren(el("p", {}, "The Risks view draws the warnings of a medicine list. Check a list on the ",
         el("a", { href: "/" }, "medicine check page"), " first, then use “see them as a graph”."));
-    } else if (!risk) loadRisk().catch(err => status(err.message));
+    } else if (!risk) riskLoading = riskLoading || loadRisk().catch(err => { riskLoading = null; status(err.message); });
     else { showRiskGraph(); if (focused !== null) focusFinding(focused); }
   } else if (next === "profile") {
     if (!load) return;
@@ -806,7 +811,7 @@ const START = { medicines: {{ medicines | tojson }}, conditions: {{ conditions |
 if (START.profile.includes(":")) {                 // "Drug:DC:2847" or "Enzyme:CYP3A"
   const at = START.profile.indexOf(":");
   openProfile(START.profile.slice(0, at), START.profile.slice(at + 1));
-} else if (START.classes) openClasses(START.classes === "all" ? "" : START.classes);
+} else if (START.classes) openClasses(START.classes === "ALL" ? "" : START.classes);
 else if (START.medicines.trim()) showMode("risk");
 else if ($("q").value.trim()) runSearch();
 </script>

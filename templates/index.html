@@ -27,7 +27,7 @@
   button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
   .hint { color: var(--muted); font-size: 13px; margin-top: 4px; }
   .score { font-size: 32px; font-weight: 700; }
-  table { width: 100%; border-collapse: collapse; } td, th { text-align: left; padding: 8px 6px; border-top: 1px solid var(--line); vertical-align: top; }
+  table { width: 100%; border-collapse: collapse; } td, th { text-align: left; padding: 8px 6px; overflow-wrap: anywhere; border-top: 1px solid var(--line); vertical-align: top; }
   th { color: var(--muted); font-weight: 600; font-size: 13px; border-top: 0; }
   .w3 { color: var(--major); font-weight: 700; } .w2 { color: var(--moderate); font-weight: 700; } .w1 { color: var(--minor); }
   code { font-size: 12px; color: var(--muted); word-break: break-word; }
@@ -111,6 +111,8 @@
           The level follows the worst finding; the score is for comparing lists.</div></div>
       <div><div class="hint">Recognised as · <a href="{{ graph_url() }}">see them as a graph →</a></div>
         {% for m in result.medicines %}<div>{% if m.input | lower != m.label | lower %}<span class="hint">{{ m.input }} →</span> {% endif %}<b>{{ m.label }}</b>{% if m.kind == 'brand' %}: {{ m.drugs | map(attribute='name') | join(', ') }}{% endif %}{% if m.incomplete %}<br><span class="warn">Composition may be incomplete: the name lists more strengths than the data has ingredients. Check the pack and add the missing ingredient as its own line.</span>{% endif %}</div>{% endfor %}
+        {% if result.cut and (result.cut.medicines or result.cut.conditions) %}<div class="warn">Only the first 30 medicines and 20 conditions are checked; {{ result.cut.medicines }} medicine line(s) and {{ result.cut.conditions }} condition line(s) were left out.</div>{% endif %}
+        {% if result.repeated %}<div class="hint">Entered more than once, counted once: {{ result.repeated | join(', ') }}</div>{% endif %}
         {% for c in result.conditions %}<span class="pill" title="{{ c.members | join(', ') }}">{% if c.input | lower != c.name | lower %}{{ c.input }} → {% endif %}{{ c.name }}{% if c.members | length > 1 %} (+{{ c.members | length - 1 }} related){% endif %}{% if c['keys'] %} · <a href="/graph?{{ {'profile': 'Condition:' ~ c['keys'][0]} | urlencode }}">graph</a>{% endif %}</span>{% endfor %}</div>
     </div>
   </div>
@@ -125,14 +127,14 @@
       {% if b.habit_forming %}<div class="effect w3"><b>Habit forming</b>
         <p>This medicine can cause dependence. Take it only as prescribed and for as short a time as the doctor says;
           do not stop suddenly without asking, as that can cause withdrawal effects.</p></div>{% endif %}
-      {% if b.subs %}<p class="meaning"><span class="hint">Same ingredients, other makers:</span></p>
+      {% if b.subs %}<p class="meaning"><span class="hint">Same medicine (same ingredients, strength and form), other makers: the cheapest {{ b.subs | length }} of {{ b.same }}{% if b.same > b.subs | length %} · <a href="/graph?{{ {'profile': 'Brand:' ~ b.key} | urlencode }}">see more</a>{% endif %}</span></p>
         <ul>{% for s in b.subs %}<li>{{ s.name }} <span class="hint">({{ s.manufacturer }})</span>: ₹{{ '%.2f' | format(s.price) }} for {{ s.pack }}{% if s.unit %}, ₹{{ '%.2f' | format(s.unit[0]) }} per {{ s.unit[1] }}{% endif %}
           {% if not s.same_strength %}<span class="warn">· check the strength matches</span>{% elif s.cheaper %}<span class="good">· cheaper</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
     </div>{% endfor %}
     {% if result.brands %}<p class="hint" style="margin:0 0 12px">Brand details: 250k Indian medicines
       dataset (Kaggle, CC BY-SA 4.0; prices as of 2022). Ask the pharmacist before switching brands.</p>{% endif %}
     {% for a in result.about %}<div style="margin:0 0 14px">
-      <b>{{ a.drug }}</b> <span class="hint">· <a href="/graph?{{ {'profile': 'Drug:' ~ a.key} | urlencode }}">profile graph</a></span>{% if a.url %} <span class="hint">· <a href="{{ a.url }}" target="_blank" rel="noopener">official label</a>{% if a.effective %}, {{ a.effective }}{% endif %}</span>{% endif %}
+      <b>{{ a.drug }}</b> <span class="hint">· <a href="/graph?{{ {'profile': 'Drug:' ~ a.key} | urlencode }}">profile graph</a></span>{% if a.url %} <span class="hint">· <a href="{{ a.url }}" target="_blank" rel="noopener">official label{% if a.route %} ({{ a.route }}){% endif %}</a>{% if a.effective %}, {{ a.effective }}{% endif %}</span>{% endif %}
       {% if a.used_for %}<p class="meaning"><span class="hint">Used for:</span> {{ a.used_for }}</p>{% endif %}
       {% if a.boxed %}<div class="effect w3"><b>Boxed warning{% if a.boxed_title %}: {{ a.boxed_title }}{% endif %}</b>
         <p>{{ a.boxed }}</p></div>{% endif %}
@@ -214,7 +216,9 @@
         <p class="meaning">{{ a.meaning }}</p>
         {{ effects(a.effects, css) | replace('Both', 'The medicine and alcohol both') }}{% endfor %}
       {% else %}<p class="good">No known alcohol interactions.</p>{% endif %}
-      {% if result.what_if %}<h2 style="margin-top:16px">What if {{ result.what_if.medicine }} is added?</h2>
+      {% if result.what_if and result.what_if.already %}<h2 style="margin-top:16px">What if {{ result.what_if.medicine }} is added?</h2>
+        <p>{{ result.what_if.medicine }} is already on the list, so the check above already includes it.</p>
+      {% elif result.what_if %}<h2 style="margin-top:16px">What if {{ result.what_if.medicine }} is added?</h2>
         <p>Risk level <span class="{{ result.what_if.level_before.css }}">{{ result.what_if.level_before.level }}</span> →
           <b class="{{ result.what_if.level_after.css }}">{{ result.what_if.level_after.level }}</b>
           <span class="hint">(score {{ result.what_if.before }} → {{ result.what_if.after }})</span></p>
@@ -260,6 +264,11 @@
     });
     input.addEventListener("keydown", e => { if (e.key === "Enter" && inputId !== "new_medicine") { e.preventDefault(); addLine(inputId, inputId === "med-in" ? "medicines" : "conditions"); } });
   }
+  // a medicine or condition typed but not yet added still counts when the form is sent
+  document.querySelector("form").addEventListener("submit", () => {
+    addLine("med-in", "medicines");
+    addLine("cond-in", "conditions");
+  });
   autocomplete("med-in", "med-list", "medicine");
   autocomplete("cond-in", "cond-list", "condition");
   autocomplete("new_medicine", "med-list2", "medicine");

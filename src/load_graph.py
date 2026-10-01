@@ -129,7 +129,8 @@ STEPS = [
                                           brand: r.brand, boxed_warning: r.boxed_warning, indications: r.indications,
                                           contraindications: r.contraindications, patient_info: r.patient_info,
                                           geriatric_use: r.geriatric_use, pregnancy: r.pregnancy,
-                                          class_notes: r.class_notes})""", None),
+                                          class_notes: r.class_notes, route: r.route,
+                                          evidence_set_id: r.evidence_set_id})""", None),
     ("label_mentions.csv", """
         UNWIND $rows AS r
         MATCH (a:Drug {key: r.a}), (b:Drug {key: r.b}) CREATE (a)-[:LABEL_MENTIONS {sentences: r.sentences}]->(b)""",

@@ -123,7 +123,7 @@ is worse than a missing one.
 ## Check nothing broke
 
 Run after any change to the data, the queries or `src/curated.py` (about 5 seconds, read-only, needs Neo4j running).
-It prints PASS/FAIL for 130 checks and ends with a count:
+It prints PASS/FAIL for 138 checks and ends with a count:
 
 ```bash
 .venv/bin/python tests/run_regression.py
@@ -167,7 +167,9 @@ DDInter (interaction severity), DrugCentral (names, drug classes, what drugs tre
 Hetionet/SIDER (side effects), US FDA enzyme table, A-Z Medicine Dataset of India and 250k Indian medicines
 (Kaggle, shudhanshusingh, CC BY-SA 4.0: brand uses, side effects, habit forming, substitutes; the extract in this
 repository is shared under the same licence), Jan Aushadhi price list,
-openFDA drug labels (public domain: what the label says about each drug and pair), TWOSIDES (Tatonetti lab:
+openFDA drug labels (public domain: what the label says about each drug and pair; the label shown is the one for
+the medicine taken by mouth when there is one, while interaction quotes come from the best-documented label),
+TWOSIDES (Tatonetti lab:
 side effects reported for drug pairs in the US FDA adverse event reports), CDSCO lists of fixed-dose combinations
 banned under Section 26A of the Drugs & Cosmetics Act (2018 onwards, as in force), and the American Geriatrics
 Society 2023 Beers Criteria® (Tables 2-5 and 7, paraphrased; applied when the patient's age is 65 or over).

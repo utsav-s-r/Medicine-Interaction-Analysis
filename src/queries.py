@@ -222,7 +222,8 @@ def _pair_evidence(driver, keys, profile):
             MATCH (a:Drug)-[m:LABEL_MENTIONS]->(b:Drug)
             WHERE a.key IN $k AND b.key IN $k
             MATCH (a)-[:HAS_LABEL]->(l:Label)
-            RETURN a.key AS ak, a.name AS a, b.key AS bk, m.sentences AS sentences, l.set_id AS set_id""", k=keys).records:
+            RETURN a.key AS ak, a.name AS a, b.key AS bk, m.sentences AS sentences,
+                   coalesce(l.evidence_set_id, l.set_id) AS set_id""", k=keys).records:
         for t in r["sentences"]:
             _add_quote(label[frozenset((r["ak"], r["bk"]))], r["a"], t, r["set_id"])
     # sentences naming a group ("NSAIDs", "drugs that prolong the QT interval") the other drug belongs to
@@ -230,7 +231,8 @@ def _pair_evidence(driver, keys, profile):
         "MATCH (d:Drug) WHERE d.key IN $k RETURN d.key AS key, coalesce(d.atc_classes, []) AS atc", k=keys).records}
     for r in driver.execute_query("""
             MATCH (a:Drug)-[:HAS_LABEL]->(l:Label) WHERE a.key IN $k AND l.class_notes <> '[]'
-            RETURN a.key AS ak, a.name AS a, l.class_notes AS notes, l.set_id AS set_id""", k=keys).records:
+            RETURN a.key AS ak, a.name AS a, l.class_notes AS notes,
+                   coalesce(l.evidence_set_id, l.set_id) AS set_id""", k=keys).records:
         notes = json.loads(r["notes"])
         for bk in keys:
             if bk == r["ak"]:
@@ -373,11 +375,14 @@ def _findings(driver, meds, conditions, age=None):
     # 2b. Duplicate ingredients: the same drug inside two different medicines
     for k, idx in owner.items():
         if len(idx) > 1:
-            labels = " and ".join(meds[i]["label"] for i in sorted(idx))
-            add("Duplicate ingredient", 3, f"{names[k]} is taken twice: in {labels}",
-                f"({labels})-[CONTAINS]->({names[k]})", [k],
-                f"Both medicines contain {names[k]}, so together they double the dose, which can lead to an overdose. "
-                f"Usually only one of them should be taken.",
+            parts = [meds[i]["label"] for i in sorted(idx)]
+            labels = ", ".join(parts[:-1]) + " and " + parts[-1]
+            times = "twice" if len(parts) == 2 else f"{len(parts)} times"
+            add("Duplicate ingredient", 3, f"{names[k]} is taken {times}: in {labels}",
+                f"({' | '.join(parts)})-[CONTAINS]->({names[k]})", [k],
+                (f"Both medicines contain {names[k]}, so together they double the dose" if len(parts) == 2 else
+                 f"All {len(parts)} medicines contain {names[k]}, so together they multiply the dose") +
+                ", which can lead to an overdose. Usually only one of them should be taken.",
                 links=[_link(_node("Brand", meds[i]["brand_key"], meds[i]["label"]), "CONTAINS", drug(k))
                        for i in sorted(idx) if meds[i].get("brand_key")])
 
@@ -575,7 +580,7 @@ def about_medicines(driver, meds):
         MATCH (d:Drug) WHERE d.key IN $k
         OPTIONAL MATCH (d)-[:HAS_LABEL]->(l:Label)
         RETURN d.key AS key, d.name AS name, l.indications AS indications, l.boxed_warning AS boxed,
-               l.set_id AS set_id, l.effective AS effective""", k=keys).records}
+               l.set_id AS set_id, l.effective AS effective, l.route AS route""", k=keys).records}
     out = []
     for k in keys:
         r = records.get(k)
@@ -588,7 +593,8 @@ def about_medicines(driver, meds):
                     "boxed_title": headline.group(1).strip(" ,;").capitalize() if headline else "",
                     "boxed": _lead((boxed[headline.end():] if headline else boxed).lstrip("• "), 320) if boxed else "",
                     "url": DAILYMED + r["set_id"] if r["set_id"] else "",
-                    "effective": f"{r['effective'][:4]}-{r['effective'][4:6]}" if r["effective"] else ""})
+                    "effective": f"{r['effective'][:4]}-{r['effective'][4:6]}" if r["effective"] else "",
+                    "route": r["route"] or ""})
     return out
 
 
@@ -601,34 +607,81 @@ def _unit_price(price, pack):
     return (round(price / int(m.group(1)), 2), m.group(2).lower()) if m and price and int(m.group(1)) else None
 
 
+# Pack forms and release types, so a plain tablet is never compared with an SR tablet or a syrup
+FORM = re.compile(r"^\s*\w+ of [\d.]+\s*(?:ml|gm|g|mg|kg|l)?\s*(.*?)\s*$", re.I)
+RELEASE = re.compile(r"\b(sr|er|xr|cr|mr|xl|la|od|cd|retard|prolonged|sustained|extended|modified|controlled)\b", re.I)
+FORM_WORDS = re.compile(r"\b(tablet|capsule|syrup|suspension|injection|infusion|cream|gel|ointment|drops?|solution|"
+                        r"lotion|spray|inhaler|sachet|powder|granules)", re.I)
+
+
+def _form(pack):
+    """'strip of 10 tablet sr' -> 'tablet sr'; 'bottle of 100 ml Syrup' -> 'syrup'."""
+    m = FORM.match(pack or "")
+    return re.sub(r"s\b", "", m.group(1).lower(), count=1) if m else ""
+
+
+def _per_unit(price, pack, name=""):
+    """Price per tablet/capsule: from the pack ("strip of 15 tablets"), or for Jan Aushadhi ("10's") from the name."""
+    unit = _unit_price(price, pack)
+    m = re.match(r"\s*(\d+)\s*'s\s*$", pack or "")
+    word = FORM_WORDS.search(name or "")
+    if not unit and m and price and int(m.group(1)) and word and word.group(1).lower() in ("tablet", "capsule"):
+        unit = (round(price / int(m.group(1)), 2), word.group(1).lower())
+    return unit
+
+
+def same_medicine(driver, key):
+    """Other brands of exactly the same medicine as brand `key`: the same ingredients at the same strengths, in the
+    same form (tablet, SR tablet, syrup...), still sold and not banned; cheapest per tablet (or per pack) first.
+    Returns (the brand's own unit price, [{n, r, unit}]) where r is the source's SUBSTITUTE link when it has one."""
+    found = driver.execute_query("""
+        MATCH (b:Brand {key: $k})-[c:CONTAINS]->(d:Drug)
+        RETURN b, collect(d.key + '@' + c.strength) AS sig, collect(c.strength) AS strengths""", k=key).records
+    if not found or not found[0]["sig"]:
+        return None, []
+    brand, signature = found[0]["b"], found[0]["sig"]
+    own = _per_unit(brand.get("price"), brand.get("pack"), brand.get("name"))
+    if not all(found[0]["strengths"]):
+        return own, []
+    form, release = _form(brand.get("pack")), set(RELEASE.findall(brand.get("name", "").lower()))
+    same = []
+    for r in driver.execute_query("""
+            MATCH (b:Brand {key: $k})-[:CONTAINS]->(first:Drug {key: $first})
+            MATCH (o:Brand {source: 'india_az', discontinued: false})-[:CONTAINS]->(first) WHERE o <> b
+              AND COUNT { (o)-[:CONTAINS]->() } = $n AND NOT EXISTS { (o)-[:BANNED_UNDER]->() }
+            MATCH (o)-[c:CONTAINS]->(d:Drug)
+            WITH b, o, collect(d.key + '@' + c.strength) AS sig WHERE all(s IN $sig WHERE s IN sig)
+            OPTIONAL MATCH (b)-[r:SUBSTITUTE]-(o)
+            RETURN o, head(collect(r)) AS r""", k=key, first=signature[0].split("@")[0], n=len(signature),
+            sig=signature).records:
+        o = r["o"]
+        if _form(o.get("pack")) == form and set(RELEASE.findall(o.get("name", "").lower())) == release:
+            same.append({"n": o, "r": r["r"], "unit": _per_unit(o.get("price"), o.get("pack"), o.get("name"))})
+    comparable = lambda x: x["unit"] and own and x["unit"][1] == own[1]
+    same.sort(key=lambda x: (not comparable(x), x["unit"][0] if comparable(x) else x["n"].get("price") or 1e9))
+    return own, same
+
+
 def about_brands(driver, meds, substitutes=3):
     """Per Indian brand in the list: what it is used for, common side effects and whether it is habit forming
-    (250k Indian medicines dataset), and same-ingredient substitutes still sold, cheapest per tablet first.
-    Pack sizes differ, so prices are compared per tablet/capsule, or per pack only when the packs are the same."""
+    (250k Indian medicines dataset), and the same medicine from other makers (same_medicine), cheapest per tablet
+    first: the same list as the brand view on /graph."""
     keys = [m["brand_key"] for m in meds if m.get("brand_key")]
     out = []
     for r in driver.execute_query("""
             UNWIND $k AS key
             MATCH (b:Brand {key: key})
-            CALL (b) {
-              OPTIONAL MATCH (b)-[x:SUBSTITUTE]->(s:Brand)
-              WHERE NOT s.discontinued AND s.price > 0 AND NOT EXISTS { (s)-[:BANNED_UNDER]->() }
-              RETURN collect(s {.name, .price, .pack, .manufacturer, same_strength: x.same_strength}) AS subs
-            }
             RETURN b.key AS key, b.name AS name, b.price AS price, b.pack AS pack, b.discontinued AS discontinued,
                    coalesce(b.uses, []) AS uses, coalesce(b.side_effects, []) AS side_effects,
-                   coalesce(b.habit_forming, false) AS habit_forming, b.therapeutic_class AS therapeutic_class, subs""",
+                   coalesce(b.habit_forming, false) AS habit_forming, b.therapeutic_class AS therapeutic_class""",
             k=keys).records:
-        own = _unit_price(r["price"], r["pack"])
-        subs = []
-        for s in r["subs"]:
-            unit = _unit_price(s["price"], s["pack"])
-            comparable = unit and own and unit[1] == own[1] and s["same_strength"]
-            subs.append({**s, "unit": unit, "cheaper": (unit[0] < own[0]) if comparable else
-                         (s["same_strength"] and s["pack"] == r["pack"] and bool(r["price"]) and s["price"] < r["price"])})
-        subs.sort(key=lambda s: (not s["same_strength"], s["unit"] is None, s["unit"][0] if s["unit"] else s["price"]))
+        own, same = same_medicine(driver, r["key"])
+        subs = [{"name": s["n"]["name"], "manufacturer": s["n"].get("manufacturer"), "price": s["n"]["price"],
+                 "pack": s["n"].get("pack"), "unit": s["unit"], "same_strength": True,
+                 "cheaper": bool(s["unit"] and own and s["unit"][1] == own[1] and s["unit"][0] < own[0])}
+                for s in same if s["n"].get("price")]
         out.append({**r.data(), "unit": own, "uses": r["uses"][:3], "side_effects": r["side_effects"][:8],
-                    "subs": subs[:substitutes]})
+                    "subs": subs[:substitutes], "same": len(same)})
     return out
 
 
@@ -647,12 +700,19 @@ def analyse(driver, medicine_texts, condition_texts, new_medicine=None, age=None
     def not_found(text, kind, field):
         unknown.append({"text": text.strip(), "field": field, "suggestions": did_you_mean(driver, text, kind)})
 
+    repeated = []                     # the same medicine or condition entered twice is counted once
     for t in medicine_texts:
         m = resolve_medicine(driver, t)
-        (meds.append(m) if m else not_found(t, "medicine", "medicines"))
+        if m and any(x["label"].lower() == m["label"].lower() for x in meds):
+            repeated.append(t.strip())
+        else:
+            (meds.append(m) if m else not_found(t, "medicine", "medicines"))
     for t in condition_texts:
         c = resolve_condition(driver, t)
-        (conditions.append(c) if c else not_found(t, "condition", "conditions"))
+        if c and any(x["name"] == c["name"] for x in conditions):
+            repeated.append(t.strip())
+        else:
+            (conditions.append(c) if c else not_found(t, "condition", "conditions"))
 
     findings, owner = _findings(driver, meds, conditions, age)
     cascades = [f for f in findings if f["kind"] == "Possible prescribing cascade"]
@@ -674,7 +734,9 @@ def analyse(driver, medicine_texts, condition_texts, new_medicine=None, age=None
     what_if = None
     if new_medicine and new_medicine.strip():
         extra = resolve_medicine(driver, new_medicine)
-        if extra:
+        if extra and any(m["label"].lower() == extra["label"].lower() for m in meds):
+            what_if = {"medicine": extra["label"], "already": True}     # adding it again is not a second medicine
+        elif extra:
             new_findings, _ = _findings(driver, meds + [extra], conditions, age)
             new_score = sum(f["weight"] for f in new_findings)
             existing = {f["title"] for f in findings}
@@ -698,7 +760,7 @@ def analyse(driver, medicine_texts, condition_texts, new_medicine=None, age=None
     risk = {r["name"]: r["risk_score"] for r in driver.execute_query(
         "MATCH (d:Drug) WHERE d.key IN $k RETURN d.name AS name, toInteger(d.risk_score) AS risk_score",
         k=keys).records}
-    return {"medicines": meds, "conditions": conditions, "unknown": unknown, "score": score, "level": risk_level(findings),
+    return {"medicines": meds, "conditions": conditions, "unknown": unknown, "repeated": repeated, "score": score, "level": risk_level(findings),
             "findings": findings, "cascades": cascades, "coverage": _coverage(driver, meds, conditions, findings), "alcohol": _alcohol(driver, keys, profile), "stacked": stacked, "about": about_medicines(driver, meds),
             "brands": about_brands(driver, meds), "alternatives": alternatives,
             "deprescribe": deprescribe, "what_if": what_if, "drug_risk": risk, "age": age, "cautions": cautions}
