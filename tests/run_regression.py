@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 import queries  # noqa: E402
+from curated import CONDITION_GROUPS  # noqa: E402
 from config import get_driver  # noqa: E402
 
 BUILD = ROOT / "build"
@@ -296,10 +297,75 @@ def main():
         WHERE a <> b AND NOT (a)-[:INTERACTS_WITH]-(b) RETURN count(*) AS n""").records[0]["n"]
     check("the hub's count of hidden pairs (no direct interaction record) matches the graph", h["hidden"] == hidden,
           (h["hidden"], hidden))
-    check("only drugs and enzymes have profiles", explore.profile(d, "Brand", "IN:1") is None
+    check("only drugs, enzymes, brands and conditions have views", explore.profile(d, "Ban", "x") is None
+          and explore.profile(d, "Brand", "no such brand") is None and explore.profile(d, "Condition", "C:none") is None
           and explore.profile(d, "Drug", "no such drug") is None)
     check("a drug profile shows its type of medicine (warfarin: antithrombotic)",
           [n["name"] for n in p["nodes"] if n.get("parent") == "classes"] == ["Antithrombotic agents"])
+    print("--- brand view")
+    bv = explore.profile(d, "Brand", "IN:25739")                                # Brufen 400 Tablet (Abbott)
+    in_box = lambda v, box: [n for n in v["nodes"] if n.get("parent") == box]
+    check("a brand view shows its ingredients, the same medicine from other makers and the Jan Aushadhi generic",
+          [b["id"] for b in bv["boxes"]] == ["ingredients", "same", "generic"], [b["id"] for b in bv["boxes"]])
+    same_keys = [n["props"]["key"] for n in in_box(bv, "same")]
+    wrong = d.execute_query("""
+        MATCH (b:Brand) WHERE b.key IN $keys
+        OPTIONAL MATCH (b)-[c:CONTAINS]->(x:Drug)
+        WITH b, collect(x.name + ' ' + c.strength) AS parts
+        WHERE parts <> ['ibuprofen 400mg'] OR b.discontinued OR EXISTS { (b)-[:BANNED_UNDER]->() }
+           OR NOT b.pack =~ '(?i).* tablets?$'
+        RETURN collect(b.name) AS bad""", keys=same_keys).records[0]["bad"]
+    check("every 'same medicine' brand has exactly the same ingredient and strength, same form, sold, not banned",
+          same_keys and not wrong, wrong)
+    units = [explore._per_unit(n["props"]["price"], n["props"]["pack"], n["props"]["name"]) for n in in_box(bv, "same")]
+    check("same-medicine brands are cheapest per tablet first",
+          all(u for u in units) and [u[0] for u in units] == sorted(u[0] for u in units), units)
+    check("the box counts every same-medicine brand, not just the listed substitutes",
+          next(b for b in bv["boxes"] if b["id"] == "same")["total"] > 5)
+    kinds = {(e["type"], bool(e.get("derived"))) for e in bv["edges"] if e["source"] != e["target"]}
+    check("listed substitutes stay real SUBSTITUTE edges; the rest are marked as worked out",
+          kinds <= {("CONTAINS", False), ("SUBSTITUTE", False), ("SAME_MEDICINE", True)} and ("SUBSTITUTE", False) in kinds,
+          kinds)
+    check("the Jan Aushadhi generic matches strength and form (ibuprofen 400 mg tablets, not 200 mg or a combination)",
+          [n["props"]["name"] for n in in_box(bv, "generic")] == ["Ibuprofen Tablets IP 400 mg"],
+          [n["props"]["name"] for n in in_box(bv, "generic")])
+    check("the summary says how much cheaper (Brufen 400: about 70% less per tablet)",
+          bv["summary"]["cheapest"]["saving"] >= 50 and bv["summary"]["generic"]["saving"] > 0, bv["summary"])
+    sr = explore.profile(d, "Brand", "IN:58235")                                # Dolo 650 Tablet
+    check("a plain tablet is not matched to SR, ER or other-release versions",
+          not any(explore.RELEASE.search(n["props"]["name"]) for n in in_box(sr, "same")))
+    banned = explore.profile(d, "Brand", "IN:210886")                            # Scofix AZ: banned combination
+    check("a banned brand shows its ban and offers no brand to switch to",
+          [b["id"] for b in banned["boxes"]] == ["ingredients", "ban"] and not banned["summary"]["same"])
+    combo = explore.profile(d, "Brand", "IN:109000")                             # Ibstatin-F: rosuvastatin + fenofibrate
+    check("an interaction between a brand's own ingredients is drawn inside its box",
+          any(e["type"] == "INTERACTS_WITH" and e["props"]["severity"] == "Major" for e in combo["edges"]))
+    print("--- condition view")
+    hf = d.execute_query("MATCH (c:Condition {name: 'Chronic heart failure'}) RETURN c.key AS k").records[0]["k"]
+    cv = explore.profile(d, "Condition", hf)
+    group_keys = [r["k"] for r in d.execute_query("MATCH (c:Condition) WHERE c.name IN $n RETURN c.key AS k",
+                                                  n=CONDITION_GROUPS["Heart failure"][1]).records]
+    check("a condition view shows what treats it, what is unsafe with it, Beers rules and its other names",
+          [b["id"] for b in cv["boxes"]] == ["treats", "unsafe", "beers", "names"], [b["id"] for b in cv["boxes"]])
+    unsafe_all = d.execute_query("""
+        MATCH (x:Drug)-[:CONTRAINDICATED_IN]->(c:Condition) WHERE c.key IN $k RETURN count(DISTINCT x) AS n""",
+        k=group_keys).records[0]["n"]
+    check("the view counts the whole condition group, as the medicine check does",
+          next(b for b in cv["boxes"] if b["id"] == "unsafe")["total"] == unsafe_all and cv["summary"]["members"] == len(group_keys),
+          (unsafe_all, cv["summary"]))
+    links = [e for e in cv["edges"] if e["type"] in ("TREATS", "CONTRAINDICATED_IN")]
+    real_ok = d.execute_query("""
+        MATCH ()-[r]->(c:Condition {key: $k}) WHERE elementId(r) IN $ids RETURN count(r) AS n""",
+        k=hf, ids=[e["id"].split("/", 1)[1] for e in links if not e.get("derived")]).records[0]["n"]
+    check("solid links are real edges to the opened condition; the rest say where they were recorded",
+          real_ok == sum(not e.get("derived") for e in links)
+          and all(e["props"].get("recorded on") for e in links if e.get("derived"))
+          and all(e["target"] == cv["center"]["id"] for e in links))
+    brands = [int(n["name"].rsplit("· ", 1)[1].split()[0].replace(",", "")) if "brands" in n["name"] else 0
+              for n in cv["nodes"] if n.get("parent") == "unsafe"]
+    check("unsafe medicines in the most Indian brands come first", brands == sorted(brands, reverse=True), brands)
+    check("the Beers rule about heart failure is attached",
+          [n["props"]["key"] for n in cv["nodes"] if n.get("parent") == "beers"] == ["BEERS:T3-heart-failure"])
     print("--- drug-class map")
     off = d.execute_query("""
         MATCH (x:Drug) UNWIND coalesce(x.atc_classes, []) AS c WITH x, collect(DISTINCT left(c, 3)) AS want

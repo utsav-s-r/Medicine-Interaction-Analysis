@@ -4,11 +4,12 @@ neighbours, a drug's profile or an enzyme's hub, the drug-class map, and the sch
 Nodes are addressed by Neo4j's elementId, so an id is only valid until the database is rebuilt. Relationship types
 cannot be Cypher parameters, so any type coming from the browser is checked against RELATIONSHIPS first.
 """
+import re
 from collections import defaultdict
 from functools import lru_cache
 
 from curated import CONDITION_GROUPS
-from queries import _fulltext
+from queries import _condition_lookup, _fulltext, _unit_price
 
 # every relationship type in the graph, as the browser may ask for them
 RELATIONSHIPS = ["CONTAINS", "INTERACTS_WITH", "INHIBITS", "INDUCES", "METABOLISED_BY", "TREATS",
@@ -180,7 +181,7 @@ def risk_graph(driver, result):
 # ---------------------------------------------------------------- profiles: one node and its meaningful neighbours
 
 # how many neighbours a profile box shows; the box always says how many there are in all
-PROFILE_LIMIT = {"interactions": 10, "conditions": 8, "enzyme": 30}
+PROFILE_LIMIT = {"interactions": 10, "conditions": 8, "enzyme": 30, "same": 12, "generic": 3, "drugs": 12}
 STRENGTH_ORDER = "CASE coalesce(r.strength, r.sensitivity) WHEN 'strong' THEN 0 WHEN 'sensitive' THEN 0 " \
                  "WHEN 'moderate' THEN 1 ELSE 2 END"
 
@@ -192,11 +193,15 @@ def _everyday_conditions():
 
 
 def profile(driver, label, key):
-    """A drug's profile or an enzyme's hub, or None for other node types (or an unknown node)."""
+    """A drug's profile, an enzyme's hub, a brand's or a condition's view, or None for other node types (or an unknown node)."""
     if label == "Drug":
         return _drug_profile(driver, key)
     if label == "Enzyme":
         return _enzyme_hub(driver, key)
+    if label == "Brand":
+        return _brand_view(driver, key)
+    if label == "Condition":
+        return _condition_view(driver, key)
     return None
 
 
@@ -204,16 +209,21 @@ def _boxes():
     """Collects a profile: the centre, then boxes of neighbours. Box nodes are Cytoscape compound parents."""
     out = {"nodes": [], "edges": [], "boxes": []}
 
-    def box(box_id, title, records, total, note=""):
+    def box(box_id, title, records, total=None, note=""):
         if not records:
             return
+        total = len(records) if total is None else total
         out["boxes"].append({"id": box_id, "title": title, "shown": len(records), "total": total, "note": note})
         out["nodes"].append({"id": box_id, "label": "Box", "name": f"{title} · {len(records)} of {total}"
                              if total > len(records) else f"{title} · {total}", "props": {}, "box": True})
         for r in records:
             n = _node(r["n"], r["name"])
             out["nodes"].append({**n, "parent": box_id, "eid": n["id"], "id": f"{box_id}/{n['id']}"})
-            e = _edge(r["r"])
+            e = _edge(r["r"]) if r.get("r") is not None else \
+                {"id": f"{r['type']}:{n['id']}", "type": r["type"], "props": r.get("props", {}), "derived": True,
+                 # inward: the worked-out link points at the centre (a drug TREATS the condition)
+                 "source": n["id"] if r.get("inward") else out["center"]["id"],
+                 "target": out["center"]["id"] if r.get("inward") else n["id"]}
             e["source"], e["target"] = (out["center"]["id"], f"{box_id}/{n['id']}") if e["source"] == out["center"]["id"] \
                 else (f"{box_id}/{n['id']}", out["center"]["id"])
             e["id"] = f"{box_id}/{e['id']}"
@@ -415,3 +425,189 @@ def class_pair(driver, a, b):
     return {"a": classes[a], "b": classes[b], "pairs": total, "possible": possible,
             "share": round(total / possible, 4) if possible else 0,
             "subpairs": subpairs, "examples": examples}
+
+
+# ---------------------------------------------------------------- brand view
+# One Indian brand: what is in it, the same medicine from other makers (cheapest per tablet first), the government
+# Jan Aushadhi generic, and its ban. "The same medicine" is worked out from CONTAINS: exactly the same ingredients
+# at the same strengths, in the same form (tablet, SR tablet, syrup...). The 1mg data's own SUBSTITUTE links are a
+# few of those, kept as real edges.
+FORM = re.compile(r"^\s*\w+ of [\d.]+\s*(?:ml|gm|g|mg|kg|l)?\s*(.*?)\s*$", re.I)
+RELEASE = re.compile(r"\b(sr|er|xr|cr|mr|xl|la|od|cd|retard|prolonged|sustained|extended|modified|controlled)\b", re.I)
+FORM_WORDS = re.compile(r"\b(tablet|capsule|syrup|suspension|injection|infusion|cream|gel|ointment|drops?|solution|"
+                        r"lotion|spray|inhaler|sachet|powder|granules)", re.I)
+
+
+def _form(pack):
+    """'strip of 10 tablet sr' -> 'tablet sr'; 'bottle of 100 ml Syrup' -> 'syrup'."""
+    m = FORM.match(pack or "")
+    return re.sub(r"s\b", "", m.group(1).lower(), count=1) if m else ""
+
+
+def _per_unit(price, pack, name=""):
+    """Price per tablet/capsule: from the pack ("strip of 15 tablets"), or for Jan Aushadhi ("10's") from the name."""
+    unit = _unit_price(price, pack)
+    m = re.match(r"\s*(\d+)\s*'s\s*$", pack or "")
+    word = FORM_WORDS.search(name or "")
+    if not unit and m and price and int(m.group(1)) and word and word.group(1).lower() in ("tablet", "capsule"):
+        unit = (round(price / int(m.group(1)), 2), word.group(1).lower())
+    return unit
+
+
+def _price_text(price, unit):
+    return f"₹{unit[0]:.2f}/{unit[1]}" if unit else f"₹{price:.2f}/pack" if price else "no price"
+
+
+def _brand_view(driver, key):
+    records = driver.execute_query(f"MATCH (n:Brand {{key: $k}}) RETURN n, {NAME} AS name", k=key).records
+    if not records:
+        return None
+    out, box = _boxes()
+    brand = records[0]["n"]
+    center = _node(brand, records[0]["name"])
+    out["center"] = {**center, "eid": center["id"]}
+    out["nodes"].append(out["center"])
+    q = lambda cypher, **kw: driver.execute_query(cypher, k=key, **kw).records
+    own_unit = _per_unit(brand.get("price"), brand.get("pack"), brand.get("name"))
+    form, release = _form(brand.get("pack")), set(RELEASE.findall(brand.get("name", "").lower()))
+
+    # what is in it, with any interaction between its own ingredients drawn inside the box
+    parts = q(f"""
+        MATCH (:Brand {{key: $k}})-[r:CONTAINS]->(n:Drug) RETURN r, n, n.name + ' ' + r.strength AS name ORDER BY n.name""")
+    box("ingredients", "Ingredients", [{"n": r["n"], "r": r["r"], "name": r["name"].strip()} for r in parts])
+    keys = [r["n"]["key"] for r in parts]
+    for r in driver.execute_query("""
+            MATCH (a:Drug)-[x:INTERACTS_WITH]->(b:Drug) WHERE a.key IN $keys AND b.key IN $keys RETURN x""",
+            keys=keys).records:
+        e = _edge(r["x"])
+        out["edges"].append({**e, "id": f"ingredients/{e['id']}", "source": f"ingredients/{e['source']}",
+                             "target": f"ingredients/{e['target']}"})
+
+    # the same medicine from other makers: same ingredients, same strengths, same form, still sold, not banned
+    same, listed = [], 0
+    if parts and all(r["r"]["strength"] for r in parts):
+        signature = sorted(f"{r['n']['key']}@{r['r']['strength']}" for r in parts)
+        for r in q("""
+                MATCH (b:Brand {key: $k})-[:CONTAINS]->(first:Drug {key: $first})
+                MATCH (o:Brand {source: 'india_az', discontinued: false})-[:CONTAINS]->(first) WHERE o <> b
+                  AND COUNT { (o)-[:CONTAINS]->() } = $n AND NOT EXISTS { (o)-[:BANNED_UNDER]->() }
+                MATCH (o)-[c:CONTAINS]->(d:Drug)
+                WITH b, o, collect(d.key + '@' + c.strength) AS sig WHERE all(s IN $sig WHERE s IN sig)
+                OPTIONAL MATCH (b)-[r:SUBSTITUTE]-(o)
+                RETURN o AS n, o.name AS name, head(collect(r)) AS r""", first=keys[0], n=len(keys), sig=signature):
+            o = r["n"]
+            if _form(o.get("pack")) != form or set(RELEASE.findall(o.get("name", "").lower())) != release:
+                continue
+            unit = _per_unit(o.get("price"), o.get("pack"), o.get("name"))
+            listed += r["r"] is not None
+            same.append({"n": o, "r": r["r"], "unit": unit, "type": "SAME_MEDICINE",
+                         "name": f"{_price_text(o.get('price'), unit)} · {r['name']}",
+                         "props": {"price": _price_text(o.get("price"), unit), "maker": o.get("manufacturer")}})
+    comparable = lambda x: x["unit"] and own_unit and x["unit"][1] == own_unit[1]
+    same.sort(key=lambda x: (not comparable(x), x["unit"][0] if comparable(x) else x["n"].get("price") or 1e9))
+    box("same", "Same medicine, other makers", same[:PROFILE_LIMIT["same"]], len(same),
+        note=f"same ingredients, strengths and form; cheapest per {own_unit[1] if own_unit else 'pack'} first"
+             + (f"; {listed} of them listed as substitutes in the source data" if listed else ""))
+
+    # Jan Aushadhi: one product per ingredient set, matched on strength and form in its name
+    generic = []
+    if parts and brand.get("source") != "jan_aushadhi":
+        word = (FORM_WORDS.search(form) or FORM_WORDS.search(brand.get("name", "")))
+        for r in q("""
+                MATCH (g:Brand {jan_aushadhi: true})-[:CONTAINS]->(:Drug {key: $first})
+                WHERE COUNT { (g)-[:CONTAINS]->() } = $n AND all(k IN $keys WHERE EXISTS { (g)-[:CONTAINS]->(:Drug {key: k}) })
+                RETURN g AS n, g.name AS name""", first=keys[0], n=len(keys), keys=keys):
+            g = r["n"]
+            text = re.sub(r"\s+", "", g.get("name", "").lower()).replace("per", "/")
+            if not all(re.search(r"(?<![\d.])" + re.escape(p["r"]["strength"].replace(" ", "").lower()), text)
+                       for p in parts):
+                continue
+            if not word or word.group(1).lower() not in g.get("name", "").lower() \
+                    or bool(RELEASE.search(g.get("name", ""))) != bool(release):
+                continue
+            unit = _per_unit(g.get("price"), g.get("pack"), g.get("name"))
+            generic.append({"n": g, "r": None, "type": "SAME_MEDICINE", "unit": unit,
+                            "name": f"{_price_text(g.get('price'), unit)} · {r['name']}",
+                            "props": {"price": _price_text(g.get("price"), unit), "matched": "by name (strength and form)"}})
+    box("generic", "Jan Aushadhi generic", generic[:PROFILE_LIMIT["generic"]], len(generic),
+        note="the government's low-price generic of the same medicine, matched by its name")
+
+    box("ban", "Banned in India", q(f"""
+        MATCH (:Brand {{key: $k}})-[r:BANNED_UNDER]->(n:Ban) RETURN r, n, {NAME} AS name"""))
+
+    # the plain summary for the side panel
+    cheapest = next((x for x in same if comparable(x)), None)
+    gen = next((x for x in generic if x["unit"] and own_unit and x["unit"][1] == own_unit[1]), None)
+    saving = lambda x: round(100 * (1 - x["unit"][0] / own_unit[0])) if x and own_unit and own_unit[0] else None
+    out["summary"] = {
+        "price": _price_text(brand.get("price"), own_unit), "maker": brand.get("manufacturer"),
+        "discontinued": brand.get("discontinued"), "uses": (brand.get("uses") or [])[:3],
+        "side_effects": (brand.get("side_effects") or [])[:6], "habit_forming": brand.get("habit_forming"),
+        "same": len(same), "cheapest": cheapest and {"name": cheapest["n"]["name"], "price": cheapest["props"]["price"],
+                                                     "saving": saving(cheapest), "key": cheapest["n"]["key"]},
+        "generic": gen and {"name": gen["n"]["name"], "price": gen["props"]["price"], "saving": saving(gen)},
+    }
+    return out
+
+
+# ---------------------------------------------------------------- condition view
+# One condition: the medicines that treat it, the medicines unsafe with it (the most-sold in India first) and the
+# Beers rules about it. A condition in a curated group ("Diabetes" is 7 DrugCentral conditions) covers the whole
+# group, as the medicine check does. A link recorded on the opened condition is the real edge; one recorded on
+# another name of the group is drawn as a worked-out link that says where it was recorded.
+SOLD_BRANDS = "COUNT { (:Brand {source: 'india_az', discontinued: false})-[:CONTAINS]->(n) }"
+
+
+def _condition_view(driver, key):
+    records = driver.execute_query(f"MATCH (n:Condition {{key: $k}}) RETURN n, {NAME} AS name", k=key).records
+    if not records:
+        return None
+    out, box = _boxes()
+    center = _node(records[0]["n"], records[0]["name"])
+    out["center"] = {**center, "eid": center["id"]}
+    out["nodes"].append(out["center"])
+    group = _condition_lookup()[1].get(records[0]["name"].lower())
+    members = driver.execute_query(f"""
+        MATCH (n:Condition) WHERE n.name IN $names OR n.key = $k RETURN n, {NAME} AS name ORDER BY n.name""",
+        names=CONDITION_GROUPS[group][1] if group else [], k=key).records
+    keys = [m["n"]["key"] for m in members]
+
+    for rel, box_id, title, note in (
+            ("TREATS", "treats", "Medicines that treat it", "medicines sold in India first, most brands first"),
+            ("CONTRAINDICATED_IN", "unsafe", "Unsafe with it",
+             "DrugCentral's contraindications, from a strict 'do not use' to 'check with a doctor first'; "
+             "the medicines in the most Indian brands first")):
+        found = driver.execute_query(f"""
+            MATCH (n:Drug)-[r:{rel}]->(c:Condition) WHERE c.key IN $keys
+            // the link on the opened condition itself first
+            WITH n, r, c ORDER BY c.key = $k DESC, c.name
+            WITH n, collect(r)[0] AS r, collect(c)[0] AS c, {SOLD_BRANDS} AS brands
+            RETURN n, r, c.key AS on_key, c.name AS on_name, n.name AS drug, brands
+            ORDER BY brands DESC, n.name""", keys=keys, k=key).records
+        box(box_id, title, [{"n": f["n"], "r": f["r"] if f["on_key"] == key else None, "type": rel, "inward": True,
+                             "props": {"recorded on": f["on_name"]},
+                             "name": f"{f['drug']} · {f['brands']:,} brands" if f["brands"] else f["drug"]}
+                            for f in found[:PROFILE_LIMIT["drugs"]]], len(found), note=note)
+
+    # Beers: rules that apply to people with this condition (the rule names the condition group)
+    rules = driver.execute_query(f"""
+        MATCH (n:Guideline) WHERE n.condition IN $names RETURN n, {NAME} AS name ORDER BY n.key""",
+        names=[group or records[0]["name"]]).records
+    box("beers", "Older adults (Beers 65+)", [{"n": r["n"], "r": None, "type": "ABOUT_CONDITION", "inward": True,
+                                              "name": r["name"], "props": {"advice": r["n"]["advice"]}} for r in rules],
+        note="AGS Beers Criteria 2023: medicines to avoid in people over 65 who have this condition")
+
+    others = [m for m in members if m["n"]["key"] != key]
+    box("names", f"Also counted as {group}" if group else "Other names", [
+        {"n": m["n"], "r": None, "type": "SAME_CONDITION", "name": m["name"], "props": {"group": group}}
+        for m in others], note="other DrugCentral names of the same condition; the boxes count links on all of them")
+
+    unsafe_brands = driver.execute_query("""
+        MATCH (d:Drug)-[:CONTRAINDICATED_IN]->(c:Condition) WHERE c.key IN $keys WITH DISTINCT d
+        MATCH (b:Brand {source: 'india_az', discontinued: false})-[:CONTAINS]->(d) RETURN count(DISTINCT b) AS n""",
+        keys=keys).records[0]["n"]
+    out["summary"] = {"group": group, "members": len(members), "unsafe_brands": unsafe_brands,
+                      "treats": next((b["total"] for b in out["boxes"] if b["id"] == "treats"), 0),
+                      "unsafe": next((b["total"] for b in out["boxes"] if b["id"] == "unsafe"), 0),
+                      "beers": len(rules)}
+    return out

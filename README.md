@@ -58,14 +58,18 @@ The **Graph explorer** is at http://localhost:5050/graph. After a check, "see th
 "show path" next to a warning opens just that warning's path. **Profile** shows a drug's meaningful connections in
 labelled boxes (its type of medicine, liver enzymes, serious interactions, what it treats, conditions it is unsafe
 with, Beers rules, its label, how many brands), or a liver enzyme's hub (the drugs that block it, speed it up, or are cleared by it, and how
-many of those pairs have no direct interaction record). Searching a drug or enzyme opens its profile, and every
-ingredient on the check page links to one. **Drug classes** shows which types of medicine clash most: the 14 main
+many of those pairs have no direct interaction record), or an Indian brand's view: its ingredients (and any
+interaction between them), the same medicine from other makers (same ingredients, strengths and form, cheapest per
+tablet first), the Jan Aushadhi generic, and its ban if the combination is banned, or a condition's view: the
+medicines that treat it, those listed as unsafe with it (the ones in the most Indian brands first) and its Beers
+rules, counting every name of the condition in the data together (as the check does). Searching a drug, brand,
+condition or enzyme opens its view, and every ingredient, brand and condition on the check page links to one. **Drug classes** shows which types of medicine clash most: the 14 main
 groups of the WHO ATC classification, linked by how many drug pairs between them have a Major interaction (or what
 share of all possible pairs). Open a group to see its classes and the classes they clash with, and click a link for
 the classes and example drug pairs behind it (medicines sold in India first), e.g. Blood → antithrombotics ↔
 anti-inflammatories → warfarin + ibuprofen. **Explore** browses any node and its neighbours; **Schema** shows the
 node and relationship types. Links straight to a view: `/graph?profile=Drug:DC:2847`, `/graph?profile=Enzyme:CYP3A`,
-`/graph?classes=all`, `/graph?classes=B`. The page loads its drawing library (Cytoscape.js) from the jsDelivr CDN,
+`/graph?profile=Brand:IN:25739`, `/graph?profile=Condition:C:C0264716`, `/graph?classes=all`, `/graph?classes=B`. The page loads its drawing library (Cytoscape.js) from the jsDelivr CDN,
 so it needs an internet connection.
 
 Stop the web page with Ctrl+C. Stop Neo4j with `docker stop medicine-neo4j`.
@@ -119,7 +123,7 @@ is worse than a missing one.
 ## Check nothing broke
 
 Run after any change to the data, the queries or `src/curated.py` (about 5 seconds, read-only, needs Neo4j running).
-It prints PASS/FAIL for 115 checks and ends with a count:
+It prints PASS/FAIL for 130 checks and ends with a count:
 
 ```bash
 .venv/bin/python tests/run_regression.py
@@ -139,7 +143,7 @@ It prints PASS/FAIL for 115 checks and ends with a count:
 | `src/load_graph.py` | Loads the graph into Neo4j and ranks drugs with Graph Data Science (degree centrality) |
 | `src/queries.py` | The six features as Cypher queries |
 | `src/app.py`, `templates/index.html` | The Flask web page (medicine check) |
-| `src/explore.py`, `templates/graph.html` | The graph explorer (/graph): the risk graph of a checked list, one warning's path, drug profiles, enzyme hubs, the drug-class map, browsing, schema |
+| `src/explore.py`, `templates/graph.html` | The graph explorer (/graph): the risk graph of a checked list, one warning's path, drug profiles, enzyme hubs, brand and condition views, the drug-class map, browsing, schema |
 | `.env` | Your Neo4j password (never committed) |
 
 ## Graph model

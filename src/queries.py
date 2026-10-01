@@ -615,7 +615,7 @@ def about_brands(driver, meds, substitutes=3):
               WHERE NOT s.discontinued AND s.price > 0 AND NOT EXISTS { (s)-[:BANNED_UNDER]->() }
               RETURN collect(s {.name, .price, .pack, .manufacturer, same_strength: x.same_strength}) AS subs
             }
-            RETURN b.name AS name, b.price AS price, b.pack AS pack, b.discontinued AS discontinued,
+            RETURN b.key AS key, b.name AS name, b.price AS price, b.pack AS pack, b.discontinued AS discontinued,
                    coalesce(b.uses, []) AS uses, coalesce(b.side_effects, []) AS side_effects,
                    coalesce(b.habit_forming, false) AS habit_forming, b.therapeutic_class AS therapeutic_class, subs""",
             k=keys).records:

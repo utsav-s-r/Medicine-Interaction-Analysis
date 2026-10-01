@@ -110,7 +110,7 @@
     <div id="profileSide" hidden>
       <div class="row"><button class="btn" id="back" type="button" hidden>← Back</button></div>
       <h2 id="profileTitle">Profile</h2>
-      <p class="hint" id="profileSummary">Search a medicine or a liver enzyme (e.g. CYP3A) above to see its profile.</p>
+      <p class="hint" id="profileSummary">Search a medicine, an Indian brand, a condition or a liver enzyme (e.g. CYP3A) above to see its profile.</p>
       <div class="findings" id="profileBoxes"></div>
     </div>
     <div id="classSide" hidden>
@@ -171,10 +171,14 @@ const TYPES = {
 };
 // links the risk graph works out rather than reads from the database
 const DERIVED_TYPES = { IN_CLASS: "Same type of medicine (drug class)",
+                        SAME_MEDICINE: "Same medicine from another maker: same ingredients, strengths and form",
+                        ABOUT_CONDITION: "Beers rule for people over 65 with this condition",
+                        SAME_CONDITION: "Another name for the same condition, counted together",
                         SAME_PROBLEM: "The side effect is what the other medicine treats" };
 const TYPE_COLOR = { CONTRAINDICATED_IN: "--Condition", TREATS: "--Condition", INHIBITS: "--Enzyme", INDUCES: "--Enzyme",
   METABOLISED_BY: "--Enzyme", FLAGGED_BY: "--Guideline", BANNED_UNDER: "--Ban", CAUSES: "--SideEffect", IN_CLASS: "--Class",
-  SAME_PROBLEM: "--muted", CONTAINS: "--muted", BELONGS_TO: "--DrugClass", PART_OF: "--DrugClass" };
+  SAME_PROBLEM: "--muted", CONTAINS: "--muted", SUBSTITUTE: "--Brand", SAME_MEDICINE: "--Brand",
+  ABOUT_CONDITION: "--Guideline", SAME_CONDITION: "--Condition", BELONGS_TO: "--DrugClass", PART_OF: "--DrugClass" };
 const ON_BY_DEFAULT = ["CONTAINS", "INTERACTS_WITH", "INHIBITS", "INDUCES", "METABOLISED_BY", "HAS_LABEL", "BANNED_UNDER",
                        "FLAGGED_BY", "CONTRAINDICATED_IN", "BELONGS_TO", "PART_OF"];
 const $ = id => document.getElementById(id);
@@ -244,6 +248,7 @@ const cy = cytoscape({
         "color": css("--muted"), "padding": 16, "text-background-opacity": 0, "text-max-width": 320 } },
     { selector: "node.center", style: { "width": 34, "height": 34, "font-size": 13, "font-weight": "bold" } },
     // drug-class map: node size and colour come with the data, link width with the number (or share) of pairs
+    { selector: "node[label = 'Brand'][parent]", style: { "text-max-width": 175 } },
     { selector: "node[color]", style: { "background-color": "data(color)", "text-max-width": 175 } },
     { selector: "node[size]", style: { "width": "data(size)", "height": "data(size)" } },
     { selector: "edge[type = 'MAJOR_PAIRS']", style: { "width": "data(weight)", "line-color": css("--major"),
@@ -342,7 +347,8 @@ async function showNode(id, { before = [] } = {}) {
           onclick: () => openNode({ id, label: n.label, name: n.name, props: n.props }) }, "Explore its connections"));
     if (hasProfile(n.label) && !(mode === "profile" && profileData && profileData.center.eid === id))
       actions.prepend(el("button", { class: "btn primary", type: "button",
-        onclick: () => openProfile(n.label, profileKey(n)) }, n.label === "Enzyme" ? "Open enzyme hub" : "Open profile"));
+        onclick: () => openProfile(n.label, profileKey(n)) },
+        n.label === "Enzyme" ? "Open enzyme hub" : n.label === "Brand" ? "Open brand view" : "Open profile"));
     box.replaceChildren(
       el("div", { class: "pill" }, el("span", { class: "swatch", style: { background: css("--" + n.label) } }), n.label),
       el("h3", { style: { margin: "8px 0 4px", fontSize: "17px", overflowWrap: "anywhere" } }, n.name),
@@ -354,7 +360,8 @@ function showEdge(e) {
   $("details").replaceChildren(
     el("div", { class: "pill" }, e.type),
     el("h3", { style: { margin: "8px 0 4px", fontSize: "16px" } }, `${name(e.source)} → ${name(e.target)}`),
-    el("p", { class: "hint" }, TYPES[e.type] || ""),
+    el("p", { class: "hint" }, TYPES[e.type] || DERIVED_TYPES[e.type] || ""),
+    e.derived ? el("p", { class: "hint" }, "Worked out by the app, not stored in the database.") : "",
     Object.keys(e.props).length ? props(e.props) : el("p", { class: "hint" }, "No further details on this relationship."));
 }
 
@@ -474,9 +481,10 @@ let profileData = null, profileTrail = [];
 // which relationship types each box holds, for "see all in Explore"
 const BOX_TYPES = { enzymes: ["INHIBITS", "INDUCES", "METABOLISED_BY"], interactions: ["INTERACTS_WITH"],
   treats: ["TREATS"], unsafe: ["CONTRAINDICATED_IN"], beers: ["FLAGGED_BY"], label: ["HAS_LABEL"],
-  blocked: ["INHIBITS"], sped: ["INDUCES"], clears: ["METABOLISED_BY"], classes: ["BELONGS_TO"] };
+  blocked: ["INHIBITS"], sped: ["INDUCES"], clears: ["METABOLISED_BY"], classes: ["BELONGS_TO"],
+  ingredients: ["CONTAINS"], ban: ["BANNED_UNDER"] };     // a brand's "same medicine" box is worked out: no Explore
 const profileKey = n => n.label === "Enzyme" ? n.props.name : n.props.key;     // how a node is addressed in a profile
-const hasProfile = label => label === "Drug" || label === "Enzyme";
+const hasProfile = label => ["Drug", "Enzyme", "Brand", "Condition"].includes(label);
 async function openProfile(label, key, { remember = true } = {}) {
   if (remember && profileData) profileTrail.push([profileData.center.label, profileKey(profileData.center)]);
   showMode("profile", { load: false });
@@ -492,19 +500,48 @@ function renderProfile() {
   cy.add(p.nodes.map(n => ({ group: "nodes", data: { ...n, short: short(n.name) } })));
   cy.add(p.edges.map(e => ({ group: "edges", data: e })));
   cy.getElementById(p.center.id).addClass("center");
-  placeBoxes();
+  // brand names (with their price) are long: wider cells, at most 4 brands in a column
+  placeBoxes(undefined, ["Brand", "Condition"].includes(p.center.label)
+    ? { cell: [190, 50], columns: n => n / 4, condense: false } : {});
   $("empty").hidden = true;
   $("back").hidden = !profileTrail.length;
-  $("profileTitle").textContent = `${p.center.label === "Enzyme" ? "Liver enzyme" : "Drug"}: ${p.center.name}`;
-  $("profileSummary").textContent = p.center.label === "Enzyme"
-    ? `${p.pairs.toLocaleString()} pairs of a drug that blocks or speeds up ${p.center.name} and a drug it clears; ` +
-      `${p.hidden.toLocaleString()} of them have no direct interaction record. The medicine check warns about those as hidden enzyme interactions.`
-    : "Its meaningful connections, grouped. Click a drug or an enzyme to open its own profile.";
+  const kind = { Enzyme: "Liver enzyme", Brand: "Brand", Drug: "Drug", Condition: "Condition" }[p.center.label];
+  $("profileTitle").textContent = `${kind}: ${p.center.name}`;
+  $("profileSummary").replaceChildren(...(p.center.label === "Brand" ? brandSummary(p)
+    : p.center.label === "Condition" ? conditionSummary(p)
+    : [p.center.label === "Enzyme"
+      ? `${p.pairs.toLocaleString()} pairs of a drug that blocks or speeds up ${p.center.name} and a drug it clears; ` +
+        `${p.hidden.toLocaleString()} of them have no direct interaction record. The medicine check warns about those as hidden enzyme interactions.`
+      : "Its meaningful connections, grouped. Click a drug or an enzyme to open its own profile."]));
   $("profileBoxes").replaceChildren(...p.boxes.map(b => el("button", { type: "button", onclick: () => showBox(b) },
     el("span", { class: "points" }, b.total > b.shown ? `${b.shown}/${b.total}` : b.total), el("span", {}, b.title))));
   status(p.center.label === "Enzyme" ? "Thicker lines: stronger effect. Click a drug for its profile."
-                                     : "Click a box title for what it holds, or any drug or enzyme to open its profile.");
+       : p.center.label === "Brand" ? "Click an ingredient for its drug profile, another brand for its own view."
+       : p.center.label === "Condition" ? "Click a medicine for its profile. Dotted: recorded on another name of the condition."
+       : "Click a box title for what it holds, or any drug or enzyme to open its profile.");
   showNode(p.center.eid);
+}
+function brandSummary(p) {
+  // a brand in plain words: its price, the cheapest same medicine, the Jan Aushadhi generic, what it is used for
+  const s = p.summary, banned = p.boxes.some(b => b.id === "ban"), less = x => x.saving > 0 ? ` (${x.saving}% less)` : "";
+  return [el("span", {}, `${s.price}${s.maker ? `, made by ${s.maker}` : ""}${s.discontinued ? " (discontinued)" : ""}.`),
+    banned ? el("span", { class: "w3" }, " This combination is banned in India.") : "",
+    s.same ? el("span", {}, ` ${s.same.toLocaleString()} other makers sell the same medicine` +
+      (s.cheapest ? `; the cheapest is ${s.cheapest.name} at ${s.cheapest.price}${less(s.cheapest)}.` : ".")) : "",
+    s.generic ? el("span", {}, ` Jan Aushadhi: ${s.generic.name}, ${s.generic.price}${less(s.generic)}.`) : "",
+    s.uses.length ? el("span", {}, ` Used for: ${s.uses.join(", ")}.`) : "",
+    s.habit_forming ? el("span", { class: "w3" }, " Habit forming.") : "",
+    s.same || s.generic ? el("span", {}, " Ask the pharmacist or doctor before switching brands.") : ""];
+}
+function conditionSummary(p) {
+  // a condition in plain words: what treats it, what to be careful with, and how common those medicines are
+  const s = p.summary;
+  return [el("span", {}, s.group && s.members > 1
+      ? `Counted as ${s.group}: ${s.members} names of this condition in the data, taken together. ` : ""),
+    el("span", {}, `${s.treats.toLocaleString()} medicines treat it; ${s.unsafe.toLocaleString()} are listed as unsafe with it`),
+    s.unsafe_brands ? el("span", {}, `, and ${s.unsafe_brands.toLocaleString()} Indian brands still sold contain one of those. `) : el("span", {}, ". "),
+    s.beers ? el("span", {}, `${s.beers} Beers rule${s.beers > 1 ? "s" : ""} for people over 65 with it. `) : "",
+    el("span", {}, "Add the condition on the medicine check page to check your own medicines against it.")];
 }
 function placeBoxes(center = cy.getElementById(profileData.center.id), { cell = [135, 56], columns = Math.sqrt, condense = true } = {}) {
   // the centre in the middle, the boxes in a ring around it, each box's nodes on a grid inside it
@@ -751,7 +788,7 @@ function showMode(next, { load = true } = {}) {
     if (!load) return;
     if (profileData) renderProfile();
     else { cy.elements().remove(); $("empty").hidden = false;
-      $("details").replaceChildren(el("p", { class: "hint" }, "Search a medicine or a liver enzyme (e.g. CYP3A) above.")); }
+      $("details").replaceChildren(el("p", { class: "hint" }, "Search a medicine, an Indian brand, a condition or a liver enzyme (e.g. CYP3A) above.")); }
   } else if (next === "explore") {
     cy.elements().remove(); if (saved) cy.add(saved); cy.edges().removeStyle();
     $("empty").hidden = cy.nodes().length > 0; applyTypeFilter();

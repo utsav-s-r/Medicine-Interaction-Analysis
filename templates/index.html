@@ -111,7 +111,7 @@
           The level follows the worst finding; the score is for comparing lists.</div></div>
       <div><div class="hint">Recognised as · <a href="{{ graph_url() }}">see them as a graph →</a></div>
         {% for m in result.medicines %}<div>{% if m.input | lower != m.label | lower %}<span class="hint">{{ m.input }} →</span> {% endif %}<b>{{ m.label }}</b>{% if m.kind == 'brand' %}: {{ m.drugs | map(attribute='name') | join(', ') }}{% endif %}{% if m.incomplete %}<br><span class="warn">Composition may be incomplete: the name lists more strengths than the data has ingredients. Check the pack and add the missing ingredient as its own line.</span>{% endif %}</div>{% endfor %}
-        {% for c in result.conditions %}<span class="pill" title="{{ c.members | join(', ') }}">{% if c.input | lower != c.name | lower %}{{ c.input }} → {% endif %}{{ c.name }}{% if c.members | length > 1 %} (+{{ c.members | length - 1 }} related){% endif %}</span>{% endfor %}</div>
+        {% for c in result.conditions %}<span class="pill" title="{{ c.members | join(', ') }}">{% if c.input | lower != c.name | lower %}{{ c.input }} → {% endif %}{{ c.name }}{% if c.members | length > 1 %} (+{{ c.members | length - 1 }} related){% endif %}{% if c['keys'] %} · <a href="/graph?{{ {'profile': 'Condition:' ~ c['keys'][0]} | urlencode }}">graph</a>{% endif %}</span>{% endfor %}</div>
     </div>
   </div>
 
@@ -119,6 +119,7 @@
   <div class="card"><h2>About your medicines</h2>
     {% for b in result.brands %}<div style="margin:0 0 14px">
       <b>{{ b.name }}</b>{% if b.price %} <span class="hint">· ₹{{ '%.2f' | format(b.price) }} for {{ b.pack }}{% if b.unit %} (₹{{ '%.2f' | format(b.unit[0]) }} per {{ b.unit[1] }}){% endif %}{% if b.discontinued %}, listed as discontinued in 2022{% endif %}</span>{% endif %}
+      <span class="hint">· <a href="/graph?{{ {'profile': 'Brand:' ~ b.key} | urlencode }}">brand graph: cheaper same medicine</a></span>
       {% if b.uses %}<p class="meaning"><span class="hint">Used for:</span> {{ b.uses | join('; ') }}</p>{% endif %}
       {% if b.side_effects %}<p class="meaning"><span class="hint">Common side effects:</span> {{ b.side_effects | join(', ') | lower }}</p>{% endif %}
       {% if b.habit_forming %}<div class="effect w3"><b>Habit forming</b>
