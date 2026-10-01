@@ -45,10 +45,11 @@ def _text(name, limit=200):
 @app.get("/graph")
 def graph():
     """medicines/conditions/age: open the risk graph of that list; finding: open on that one warning's path;
-    profile: open a drug's profile or an enzyme's hub ("Drug:DC:2847", "Enzyme:CYP3A")."""
+    profile: open a drug's profile or an enzyme's hub ("Drug:DC:2847", "Enzyme:CYP3A");
+    classes: open the drug-class map ("all", or a main group such as "B")."""
     return render_template("graph.html", medicines=_text("medicines", 2000), conditions=_text("conditions", 1000),
                            age=_text("age", 3), finding=_text("finding", 300), q=_text("q", 100),
-                           profile=_text("profile", 120))
+                           profile=_text("profile", 120), classes=_text("classes", 3))
 
 
 @app.get("/api/graph/schema")
@@ -91,9 +92,21 @@ def graph_profile():
     return jsonify(found) if found else abort(404)
 
 
-@app.get("/api/graph/network")
-def graph_network():
-    return jsonify(explore.drug_network(driver, _text("severity", 10) or "Major"))
+@app.get("/api/graph/classes")
+def graph_classes():
+    """The drug-class map: the 14 main groups, or with group=B the classes inside that group."""
+    group = _text("group", 3)
+    if not group:
+        return jsonify(explore.class_map(driver))
+    found = explore.class_group(driver, group)
+    return jsonify(found) if found else abort(404)
+
+
+@app.get("/api/graph/class-pair")
+def graph_class_pair():
+    """The Major drug pairs between two drug classes (codes like B and M, or B01 and M01)."""
+    found = explore.class_pair(driver, _text("a", 3), _text("b", 3))
+    return jsonify(found) if found else abort(404)
 
 
 @app.get("/api/suggest")

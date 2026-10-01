@@ -8,12 +8,12 @@
   :root { --bg:#f7f7f5; --card:#fff; --text:#1d1d1b; --muted:#6b6b66; --line:#e3e2dd; --accent:#1f4e79; --on-accent:#fff;
           --major:#b42318; --moderate:#b54708; --minor:#98a2b3;
           --Drug:#2563eb; --Brand:#0d9488; --Condition:#9333ea; --SideEffect:#db2777; --Enzyme:#a16207;
-          --Label:#64748b; --Ban:#dc2626; --Guideline:#ea580c; --Class:#78716c; }
+          --Label:#64748b; --Ban:#dc2626; --Guideline:#ea580c; --Class:#78716c; --DrugClass:#57534e; }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#161615; --card:#1f1f1d; --text:#ecebe6; --muted:#a3a29c; --line:#34332f; --accent:#84adff; --on-accent:#0b1b33;
             --major:#f97066; --moderate:#fdb022; --minor:#667085;
             --Drug:#60a5fa; --Brand:#2dd4bf; --Condition:#c084fc; --SideEffect:#f472b6; --Enzyme:#facc15;
-            --Label:#94a3b8; --Ban:#f87171; --Guideline:#fb923c; --Class:#a8a29e; } }
+            --Label:#94a3b8; --Ban:#f87171; --Guideline:#fb923c; --Class:#a8a29e; --DrugClass:#d6d3d1; } }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   html, body { height: 100%; }
@@ -38,8 +38,7 @@
   aside { overflow: auto; padding: 12px 14px; border-right: 1px solid var(--line); }
   aside.details { border-right: 0; border-left: 1px solid var(--line); }
   #stage { position: relative; min-height: 0; }
-  #cy, #sg { position: absolute; inset: 0; }
-  #sg { display: none; }
+  #cy { position: absolute; inset: 0; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 6px; }
   h2:first-child { margin-top: 0; }
   label.check { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer; }
@@ -90,7 +89,7 @@
     <button type="button" data-mode="risk" aria-pressed="false">Risks</button>
     <button type="button" data-mode="profile" aria-pressed="false">Profile</button>
     <button type="button" data-mode="explore" aria-pressed="true">Explore</button>
-    <button type="button" data-mode="network" aria-pressed="false">Drug network</button>
+    <button type="button" data-mode="classes" aria-pressed="false">Drug classes</button>
     <button type="button" data-mode="schema" aria-pressed="false">Schema</button>
   </div>
   <div class="search">
@@ -114,6 +113,21 @@
       <p class="hint" id="profileSummary">Search a medicine or a liver enzyme (e.g. CYP3A) above to see its profile.</p>
       <div class="findings" id="profileBoxes"></div>
     </div>
+    <div id="classSide" hidden>
+      <div class="row"><button class="btn" id="classUp" type="button" hidden>← All groups</button></div>
+      <h2 id="classTitle">Drug classes</h2>
+      <p class="hint" id="classSummary"></p>
+      <h2>Rank links by</h2>
+      <select id="classRank" aria-label="Rank links by">
+        <option value="pairs" selected>Number of Major pairs</option><option value="share">Share of possible pairs</option>
+      </select>
+      <h2>Show the strongest</h2>
+      <select id="classCount" aria-label="Number of links shown">
+        <option>10</option><option selected>20</option><option>40</option>
+      </select>
+      <h2>Links shown</h2>
+      <div class="findings" id="classLinks"></div>
+    </div>
     <div id="exploreSide">
       <h2>Show relationships</h2>
       <div id="types"></div>
@@ -132,9 +146,8 @@
 
   <div id="stage">
     <div id="cy"></div>
-    <div id="sg"></div>
     <div class="empty" id="empty"><p>Search above for any medicine, brand, condition or side effect to start
-      exploring, or open <b>Drug network</b> to see every serious interaction at once.</p></div>
+      exploring, or open <b>Drug classes</b> to see which types of medicine clash most.</p></div>
     <div class="status" id="status" hidden></div>
   </div>
 
@@ -144,28 +157,26 @@
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/graphology@0.25.4/dist/graphology.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/graphology-library@0.8.0/dist/graphology-library.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/sigma@3.0.1/dist/sigma.min.js"></script>
 <script>
 "use strict";
 // Every value from the data is inserted with textContent (never innerHTML): label texts come from outside sources.
-const LABELS = ["Drug", "Brand", "Condition", "SideEffect", "Enzyme", "Label", "Ban", "Guideline", "Class"];
+const LABELS = ["Drug", "Brand", "Condition", "SideEffect", "Enzyme", "Label", "Ban", "Guideline", "DrugClass", "Class"];
 const TYPES = {
   CONTAINS: "Brand contains drug", INTERACTS_WITH: "Drug interacts with drug", INHIBITS: "Blocks liver enzyme",
   INDUCES: "Speeds up liver enzyme", METABOLISED_BY: "Cleared by liver enzyme", TREATS: "Treats condition",
   CONTRAINDICATED_IN: "Unsafe with condition", CAUSES: "Causes side effect", HAS_LABEL: "Official US label",
   LABEL_MENTIONS: "Label warns about drug", REPORTED_TOGETHER: "Side effects reported together",
   BANNED_UNDER: "Banned in India", SUBSTITUTE: "Same-ingredient substitute", FLAGGED_BY: "Beers criterion (65+)",
+  BELONGS_TO: "Drug is in a drug class", PART_OF: "Class is part of a main group",
 };
 // links the risk graph works out rather than reads from the database
 const DERIVED_TYPES = { IN_CLASS: "Same type of medicine (drug class)",
                         SAME_PROBLEM: "The side effect is what the other medicine treats" };
 const TYPE_COLOR = { CONTRAINDICATED_IN: "--Condition", TREATS: "--Condition", INHIBITS: "--Enzyme", INDUCES: "--Enzyme",
   METABOLISED_BY: "--Enzyme", FLAGGED_BY: "--Guideline", BANNED_UNDER: "--Ban", CAUSES: "--SideEffect", IN_CLASS: "--Class",
-  SAME_PROBLEM: "--muted", CONTAINS: "--muted" };
+  SAME_PROBLEM: "--muted", CONTAINS: "--muted", BELONGS_TO: "--DrugClass", PART_OF: "--DrugClass" };
 const ON_BY_DEFAULT = ["CONTAINS", "INTERACTS_WITH", "INHIBITS", "INDUCES", "METABOLISED_BY", "HAS_LABEL", "BANNED_UNDER",
-                       "FLAGGED_BY", "CONTRAINDICATED_IN"];
+                       "FLAGGED_BY", "CONTRAINDICATED_IN", "BELONGS_TO", "PART_OF"];
 const $ = id => document.getElementById(id);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 function el(tag, props = {}, ...children) {
@@ -230,8 +241,13 @@ const cy = cytoscape({
     { selector: "node[?box]", style: { "shape": "round-rectangle", "background-color": css("--card"),
         "background-opacity": 0.6, "border-width": 1, "border-color": css("--line"), "label": "data(name)",
         "text-valign": "top", "text-halign": "center", "text-margin-y": -4, "font-size": 11, "font-weight": "bold",
-        "color": css("--muted"), "padding": 16, "text-background-opacity": 0 } },
+        "color": css("--muted"), "padding": 16, "text-background-opacity": 0, "text-max-width": 320 } },
     { selector: "node.center", style: { "width": 34, "height": 34, "font-size": 13, "font-weight": "bold" } },
+    // drug-class map: node size and colour come with the data, link width with the number (or share) of pairs
+    { selector: "node[color]", style: { "background-color": "data(color)", "text-max-width": 175 } },
+    { selector: "node[size]", style: { "width": "data(size)", "height": "data(size)" } },
+    { selector: "edge[type = 'MAJOR_PAIRS']", style: { "width": "data(weight)", "line-color": css("--major"),
+        "target-arrow-shape": "none", "opacity": 0.45, "loop-direction": "-45deg", "loop-sweep": "-50deg" } },
     { selector: "edge:selected", style: { "width": 4, "line-color": css("--accent"), "target-arrow-color": css("--accent") } },
     { selector: ".hidden", style: { "display": "none" } },
   ],
@@ -286,9 +302,10 @@ async function openNode(item, { expandIt = true } = {}) {
   else cy.animate({ center: { eles: node }, zoom: 1.2, duration: 300 });
 }
 cy.on("tap", "node", e => mode === "risk" ? showRiskNode(e.target.data()) : mode === "profile" ? profileTap(e.target)
-                                                                                         : showNode(e.target.id()));
+                        : mode === "classes" ? classTap(e.target) : showNode(e.target.id()));
 cy.on("dbltap", "node", e => { if (mode === "explore") expand(e.target.id()); });
-cy.on("tap", "edge", e => mode === "risk" ? showRiskEdge(e.target.data()) : showEdge(e.target.data()));
+cy.on("tap", "edge", e => mode === "risk" ? showRiskEdge(e.target.data())
+                        : mode === "classes" ? showClassPair(e.target.data("link")) : showEdge(e.target.data()));
 
 // ------------------------------------------------------------------ details panel
 function value(v) {
@@ -457,7 +474,7 @@ let profileData = null, profileTrail = [];
 // which relationship types each box holds, for "see all in Explore"
 const BOX_TYPES = { enzymes: ["INHIBITS", "INDUCES", "METABOLISED_BY"], interactions: ["INTERACTS_WITH"],
   treats: ["TREATS"], unsafe: ["CONTRAINDICATED_IN"], beers: ["FLAGGED_BY"], label: ["HAS_LABEL"],
-  blocked: ["INHIBITS"], sped: ["INDUCES"], clears: ["METABOLISED_BY"] };
+  blocked: ["INHIBITS"], sped: ["INDUCES"], clears: ["METABOLISED_BY"], classes: ["BELONGS_TO"] };
 const profileKey = n => n.label === "Enzyme" ? n.props.name : n.props.key;     // how a node is addressed in a profile
 const hasProfile = label => label === "Drug" || label === "Enzyme";
 async function openProfile(label, key, { remember = true } = {}) {
@@ -489,25 +506,28 @@ function renderProfile() {
                                      : "Click a box title for what it holds, or any drug or enzyme to open its profile.");
   showNode(p.center.eid);
 }
-function placeBoxes() {
+function placeBoxes(center = cy.getElementById(profileData.center.id), { cell = [135, 56], columns = Math.sqrt, condense = true } = {}) {
   // the centre in the middle, the boxes in a ring around it, each box's nodes on a grid inside it
-  const boxes = cy.nodes("[?box]"), single = cy.nodes().filter(n => !n.data("box") && !n.data("parent") && !n.hasClass("center"));
+  // (cell: grid cell width and height; columns: how many columns a box of n nodes gets)
+  const boxes = cy.nodes("[?box]").filter(b => !b.same(center));
+  const single = cy.nodes().filter(n => !n.data("box") && !n.data("parent") && !n.same(center));
   const ring = [...boxes, ...single], sizes = new Map();
-  boxes.forEach(b => {
-    const n = b.children().length, cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols);
-    sizes.set(b.id(), { cols, w: cols * 135, h: rows * 56 });
+  [...boxes, ...(center.data("box") ? [center] : [])].forEach(b => {
+    const n = b.children().length, cols = Math.ceil(columns(n)), rows = Math.ceil(n / cols);
+    sizes.set(b.id(), { cols, w: cols * cell[0], h: rows * cell[1] });
   });
+  const grid = (b, x, y) => { const size = sizes.get(b.id());
+    b.children().layout({ name: "grid", cols: size.cols, avoidOverlap: true, animate: false, condense,
+      boundingBox: { x1: x - size.w / 2, y1: y - size.h / 2, w: size.w, h: size.h } }).run(); };
   // the ring is just big enough for the boxes to sit side by side around the centre
   const extent = item => { const z = sizes.get(item.id()); return z ? Math.max(z.w, z.h) : 60; };
   const around = ring.reduce((sum, item) => sum + extent(item), 0);
-  const radius = Math.max(around * 1.2 / (2 * Math.PI), Math.max(...ring.map(extent)) / 2 + 130);
-  cy.getElementById(profileData.center.id).position({ x: 0, y: 0 });
+  const inner = center.data("box") ? extent(center) / 2 : 0;
+  const radius = Math.max(around * 1.2 / (2 * Math.PI), Math.max(...ring.map(extent), 0) / 2 + inner + 130);
+  if (center.data("box")) grid(center, 0, 0); else center.position({ x: 0, y: 0 });
   ring.forEach((item, i) => {
     const a = -Math.PI / 2 + (2 * Math.PI * i) / ring.length, x = radius * Math.cos(a), y = radius * Math.sin(a);
-    const size = sizes.get(item.id());
-    if (!size) { item.position({ x, y }); return; }
-    item.children().layout({ name: "grid", cols: size.cols, avoidOverlap: true, animate: false, condense: true,
-      boundingBox: { x1: x - size.w / 2, y1: y - size.h / 2, w: size.w, h: size.h } }).run();
+    if (sizes.has(item.id())) grid(item, x, y); else item.position({ x, y });
   });
   requestAnimationFrame(() => cy.fit(cy.elements(), 30));     // after the boxes have taken their new size
 }
@@ -530,6 +550,7 @@ function profileTap(n) {
   if (d.box) return showBox(profileData.boxes.find(b => b.id === d.id));
   if (n.hasClass("center")) return showNode(d.eid);
   if (hasProfile(d.label) && d.eid) return openProfile(d.label, profileKey(d));
+  if (d.label === "DrugClass") return openClasses(d.props.code[0], { pick: d.props.code });
   if (d.eid) return showNode(d.eid);
   $("details").replaceChildren(el("div", { class: "pill" }, "Summary"), el("h3", { style: { margin: "8px 0 4px" } }, d.name),
     el("p", { class: "hint" }, "A count, not a single node: there are too many brands to draw."), props(d.props));
@@ -550,56 +571,142 @@ async function runSearch() {
   const found = await api("/api/graph/search", { q: text });
   box.replaceChildren(...(found.length ? found.map(item => el("button", { type: "button", role: "option",
       onclick: () => { box.style.display = "none";
-        hasProfile(item.label) ? openProfile(item.label, profileKey(item)) : openNode(item); } },
+        hasProfile(item.label) ? openProfile(item.label, profileKey(item))
+        : item.label === "DrugClass" ? openClasses(item.props.code[0], { pick: item.props.code }) : openNode(item); } },
       el("span", { class: "swatch", style: { background: css("--" + item.label) } }),
       el("span", {}, item.name), el("span", { class: "hint", style: { marginLeft: "auto" } }, item.label)))
     : [el("div", { class: "hint", style: { padding: "8px 10px" } }, "No match")]));
   box.style.display = "block";
 }
 
-// ------------------------------------------------------------------ drug network view (Sigma, WebGL)
-let sigma = null, network = null;
-const GROUPS = { A: "Digestion & metabolism", B: "Blood", C: "Heart & blood vessels", D: "Skin", G: "Urinary & sex hormones",
-  H: "Hormones", J: "Infections", L: "Cancer & immune", M: "Muscles & joints", N: "Nervous system", P: "Parasites",
-  R: "Breathing", S: "Eyes & ears", V: "Other", "?": "Unclassified" };
+// ------------------------------------------------------------------ drug-class map: Major interactions between types of medicine
+// The 14 main groups first; open one to see its classes and the classes they clash with most. A link's width is
+// the number of drug pairs with a Major interaction between the two (or the share of all possible pairs).
 const GROUP_COLORS = { A: "#16a34a", B: "#dc2626", C: "#2563eb", D: "#d97706", G: "#db2777", H: "#7c3aed", J: "#0891b2",
-  L: "#9333ea", M: "#ca8a04", N: "#4f46e5", P: "#65a30d", R: "#0d9488", S: "#e11d48", V: "#64748b", "?": "#94a3b8" };
-async function showNetwork() {
-  if (sigma) return;
-  status("Loading every drug with a Major interaction…");
-  const data = await api("/api/graph/network", { severity: "Major" });
-  const g = new graphology.Graph({ type: "undirected", multi: false });
-  const maxRisk = Math.max(...data.nodes.map(n => n.risk), 1);
-  data.nodes.forEach((n, i) => g.addNode(i, { label: n.name, id: n.id, group: n.group,
-    x: Math.cos(i) * 100 * Math.random(), y: Math.sin(i) * 100 * Math.random(),
-    size: 2 + 10 * Math.sqrt(n.risk / maxRisk), color: GROUP_COLORS[n.group] || GROUP_COLORS["?"] }));
-  data.edges.forEach(([a, b]) => { if (a !== b && !g.hasEdge(a, b)) g.addEdge(a, b, { color: "rgba(150,150,150,0.12)", size: 0.5 }); });
-  status(`${data.nodes.length.toLocaleString()} drugs, ${g.size.toLocaleString()} Major interactions. Arranging…`);
-  const fa2 = graphologyLibrary.layoutForceAtlas2;
-  const settings = { ...fa2.inferSettings(g), barnesHutOptimize: true, gravity: 1, scalingRatio: 8, slowDown: 5 };
-  const worker = new graphologyLibrary.FA2Layout(g, { settings });
-  worker.start();
-  setTimeout(() => { worker.stop(); status(`${data.nodes.length.toLocaleString()} drugs, ${g.size.toLocaleString()} Major interactions. Hover to highlight, click for details.`); }, 6000);
-  let hovered = null;
-  sigma = new Sigma(g, $("sg"), {
-    labelColor: { color: css("--text") }, labelRenderedSizeThreshold: 9, defaultEdgeColor: "#999",
-    nodeReducer: (node, attr) => hovered !== null && node !== hovered && !g.areNeighbors(node, hovered)
-      ? { ...attr, color: "rgba(160,160,160,0.25)", label: "" } : attr,
-    edgeReducer: (edge, attr) => hovered !== null && !g.extremities(edge).includes(hovered)
-      ? { ...attr, hidden: true } : hovered !== null ? { ...attr, color: css("--major"), size: 1 } : attr,
-  });
-  sigma.on("enterNode", ({ node }) => { hovered = node; sigma.refresh(); });
-  sigma.on("leaveNode", () => { hovered = null; sigma.refresh(); });
-  sigma.on("clickNode", ({ node }) => {
-    const a = g.getNodeAttributes(node);
-    showNode(a.id).then(() => $("details").prepend(el("div", { class: "row" },
-      el("button", { class: "btn primary", type: "button", onclick: () =>
-        openNode({ id: a.id, label: "Drug", name: a.label, props: {} }) }, "Open in Explore view"))));
-  });
-  $("legend").append(el("h2", {}, "Drug network colours"),
-    ...Object.entries(GROUPS).map(([k, v]) => el("div", { class: "check" },
-      el("span", { class: "swatch", style: { background: GROUP_COLORS[k] } }), v)));
+  L: "#9333ea", M: "#ca8a04", N: "#4f46e5", P: "#65a30d", R: "#0d9488", S: "#e11d48", V: "#64748b" };
+let classMap = null, classView = null, classInfo = {};    // classView: the opened group (null for the overview)
+let classRequest = 0;                                     // only the latest openClasses draws (clicks can overtake)
+const pct = share => `${(share * 100).toFixed(share >= 0.01 ? 1 : 2)}%`;
+const linkValue = l => $("classRank").value === "share" ? pct(l.share) : l.pairs.toLocaleString();
+const linkName = l => l.a === l.b ? `Inside ${classInfo[l.a].name}` : `${classInfo[l.a].name} ↔ ${classInfo[l.b].name}`;
+async function openClasses(group = "", { pick = "" } = {}) {
+  showMode("classes", { load: false });
+  status("Loading the drug-class map…");
+  const request = ++classRequest;
+  try {
+    if (!classMap) classMap = await api("/api/graph/classes");
+    const view = group ? await api("/api/graph/classes", { group }) : null;
+    if (request !== classRequest || mode !== "classes") return;
+    classView = view;
+    drawClasses();
+    const node = pick && cy.getElementById("C:" + pick);
+    if (node && node.length) { node.select(); classTap(node, { open: false }); }
+  } catch (err) { status(err.message); }
 }
+function classNode(c, size, parent) {
+  classInfo[c.code] = c;
+  return { group: "nodes", data: { id: "C:" + c.code, label: "DrugClass", name: c.name, parent, size,
+    short: `${short(c.name)} (${c.drugs})`, color: GROUP_COLORS[c.code[0]] || css("--muted"),
+    props: { code: c.code, "ATC name": c.atc_name, drugs: c.drugs } } };
+}
+function drawClasses() {
+  const by = $("classRank").value;
+  const all = classView ? classView.links : classMap.links;
+  // ranked by share, a link needs 10 pairs or more: two tiny classes with one pair would otherwise top the list
+  const links = all.filter(l => by === "pairs" || l.pairs >= 10).sort((x, y) => y[by] - x[by]).slice(0, +$("classCount").value);
+  const max = Math.max(...links.map(l => l[by]), 1e-9);
+  cy.elements().remove(); classInfo = {};
+  // names of every class the view knows, drawn or not (a class's details list all its links)
+  [...classMap.groups, ...(classView ? [...classView.classes, ...classView.partners] : [])]
+    .forEach(c => { classInfo[c.code] = c; });
+  if (!classView) {
+    const most = Math.max(...classMap.groups.map(g => g.drugs));
+    cy.add(classMap.groups.map(g => classNode(g, 22 + 38 * Math.sqrt(g.drugs / most))));
+  } else {
+    // the opened group as a box in the middle; the classes it clashes with in boxes of their own groups around it
+    const g = classView.group, box = code => ({ group: "nodes", data: { id: "B:" + code, label: "Box", box: true,
+      name: `${classInfo[code].name}${code === g.code ? ` · ${g.drugs} drugs` : ""}`, props: {} } });
+    const linked = new Set(links.flatMap(l => [l.a, l.b]));
+    const partners = classView.partners.filter(c => linked.has(c.code));
+    const most = Math.max(...[...classView.classes, ...partners].map(c => c.drugs), 1);
+    const size = c => 14 + 22 * Math.sqrt(c.drugs / most);
+    cy.add([box(g.code), ...[...new Set(partners.map(c => c.code[0]))].map(box)]);
+    cy.add([...classView.classes.map(c => classNode(c, size(c), "B:" + g.code)),
+            ...partners.map(c => classNode(c, size(c), "B:" + c.code[0]))]);
+  }
+  cy.add(links.map(l => ({ group: "edges", data: { id: `L:${l.a}|${l.b}`, type: "MAJOR_PAIRS", source: "C:" + l.a,
+    target: "C:" + l.b, weight: 1.5 + 10 * l[by] / max, link: l, props: {} } })));
+  // class names are long: wide cells, and boxes taller than wide (up to 4 classes in a column)
+  if (classView) placeBoxes(cy.getElementById("B:" + classView.group.code), { cell: [190, 50], columns: n => n / 4, condense: false });
+  else { cy.layout({ name: "circle", padding: 50, animate: false }).run(); }
+  $("empty").hidden = true;
+  $("classUp").hidden = !classView;
+  $("classTitle").textContent = classView ? `Group: ${classView.group.name}` : "Drug classes";
+  $("classSummary").textContent = classView
+    ? `${classView.group.atc_name}. Its classes, and the classes they have the most Major interactions with ` +
+      `(${links.length} of ${classView.all_links} links). A loop is a clash inside one class.`
+    : `${classMap.pairs.toLocaleString()} drug pairs with a Major interaction, counted between the 14 main groups ` +
+      `of medicine (WHO ATC). Showing the ${links.length} strongest links; open a group to see which classes clash.`;
+  $("classLinks").replaceChildren(...links.map(l => el("button", { type: "button", onclick: () => {
+      cy.$(":selected").unselect(); cy.getElementById(`L:${l.a}|${l.b}`).select(); showClassPair(l); } },
+    el("span", { class: "points w3", style: { minWidth: "44px" } }, linkValue(l)), el("span", {}, linkName(l)))));
+  status(classView ? "Click a link for example drug pairs, a class from another group to open that group."
+                   : "Click a link for what it is made of, a group to open it. Bigger circle: more drugs.");
+  $("details").replaceChildren(el("p", { class: "hint" }, "Click a link or a class."));
+}
+function classTap(n, { open = true } = {}) {
+  const d = n.data();
+  if (d.box) {                                     // a group's box: the opened group's own, or another one to open
+    const code = d.id.slice(2);
+    if (open && code !== classView.group.code) return openClasses(code);
+    return groupDetails(classInfo[code]);
+  }
+  const code = d.props.code;
+  if (!classView) { if (open) return openClasses(code); return groupDetails(classInfo[code]); }
+  const links = classView.links.filter(l => l.a === code || l.b === code);
+  const other = code[0] !== classView.group.code;
+  $("details").replaceChildren(...[el("div", { class: "pill" }, "Drug class"),
+    el("h3", { style: { margin: "8px 0 4px" } }, d.name), props(d.props),
+    other ? el("div", { class: "row" }, el("button", { class: "btn primary", type: "button",
+      onclick: () => openClasses(code[0], { pick: code }) }, `Open the ${classInfo[code[0]].name} group`)) : null,
+    links.length ? el("h2", {}, "Major interactions with") : el("p", { class: "hint" }, "None among the links shown."),
+    el("div", { class: "findings" }, links.map(l => el("button", { type: "button", onclick: () => showClassPair(l) },
+      el("span", { class: "points w3", style: { minWidth: "44px" } }, linkValue(l)), el("span", {}, linkName(l)))))]
+    .filter(Boolean));
+}
+function groupDetails(g) {
+  $("details").replaceChildren(el("div", { class: "pill" }, "Main group"), el("h3", { style: { margin: "8px 0 4px" } }, g.name),
+    props({ "ATC group": `${g.code}: ${g.atc_name}`, drugs: g.drugs, "Major pairs inside": g.within }),
+    el("div", { class: "row" },
+      !classView || classView.group.code !== g.code
+        ? el("button", { class: "btn primary", type: "button", onclick: () => openClasses(g.code) }, "Open this group") : "",
+      g.within ? el("button", { class: "btn", type: "button", onclick: () => showClassPair({ a: g.code, b: g.code }) },
+        "Pairs inside this group") : ""));
+}
+async function showClassPair(l) {
+  const p = await api("/api/graph/class-pair", { a: l.a, b: l.b });
+  const same = p.a.code === p.b.code;
+  const checkUrl = x => "/graph?" + new URLSearchParams({ medicines: `${x.a_name}\n${x.b_name}` });
+  $("details").replaceChildren(...[el("div", { class: "pill" }, "Major interactions"),
+    el("h3", { style: { margin: "8px 0 4px" } }, same ? `Inside ${p.a.name}` : `${p.a.name} ↔ ${p.b.name}`),
+    el("p", {}, `${p.pairs.toLocaleString()} pairs of drugs with a Major interaction: ${pct(p.share)} of the `,
+      `${p.possible.toLocaleString()} possible pairs.`),
+    el("p", { class: "hint" }, "Major: the combination can be dangerous; it is usually avoided, or needs a doctor's close watch."),
+    p.subpairs.length ? el("h2", {}, "Made up mostly of") : null,
+    p.subpairs.length ? el("div", { class: "findings" }, p.subpairs.map(x => el("button", { type: "button",
+      onclick: () => showClassPair(x) }, el("span", { class: "points w3", style: { minWidth: "44px" } }, x.pairs.toLocaleString()),
+      el("span", {}, x.a === x.b ? `Inside ${x.a_name}` : `${x.a_name} ↔ ${x.b_name}`)))) : null,
+    el("h2", {}, "Examples, medicines sold in India first"),
+    ...p.examples.map(x => el("div", { class: "box" },
+      el("b", {}, `${x.a_name} + ${x.b_name}`), x.india ? el("span", { class: "hint" }, " · both sold in India") : "",
+      el("div", { class: "row" },
+        el("button", { class: "btn", type: "button", onclick: () => openProfile("Drug", x.a_key) }, x.a_name),
+        el("button", { class: "btn", type: "button", onclick: () => openProfile("Drug", x.b_key) }, x.b_name),
+        el("a", { class: "btn", href: checkUrl(x) }, "Risks of the two together"))))].filter(Boolean));
+}
+$("classUp").addEventListener("click", () => openClasses(""));
+$("classRank").addEventListener("change", () => classMap && drawClasses());
+$("classCount").addEventListener("change", () => classMap && drawClasses());
 
 // ------------------------------------------------------------------ schema view
 async function showSchema() {
@@ -628,11 +735,10 @@ function showMode(next, { load = true } = {}) {
   if (mode === "schema") cy.elements().remove();
   mode = next;
   document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-pressed", b.dataset.mode === next));
-  $("cy").style.display = next === "network" ? "none" : "block";
-  $("sg").style.display = next === "network" ? "block" : "none";
   $("riskSide").hidden = next !== "risk";
   $("exploreSide").hidden = next !== "explore";
   $("profileSide").hidden = next !== "profile";
+  $("classSide").hidden = next !== "classes";
   status("");
   if (next === "risk") {
     if (!START.medicines.trim()) {
@@ -649,21 +755,22 @@ function showMode(next, { load = true } = {}) {
   } else if (next === "explore") {
     cy.elements().remove(); if (saved) cy.add(saved); cy.edges().removeStyle();
     $("empty").hidden = cy.nodes().length > 0; applyTypeFilter();
-  } else if (next === "network") { $("empty").hidden = true; showNetwork().catch(err => status(err.message)); }
+  } else if (next === "classes") { if (load) classMap ? drawClasses() : openClasses(""); }
   else showSchema().catch(err => status(err.message));
 }
 document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => showMode(b.dataset.mode)));
-$("fit").addEventListener("click", () => mode === "network" ? sigma && sigma.getCamera().animatedReset() : cy.animate({ fit: { padding: 40 } }));
+$("fit").addEventListener("click", () => cy.animate({ fit: { padding: 40 } }));
 $("clear").addEventListener("click", () => { if (mode === "explore") { cy.elements().remove(); saved = null;
   $("empty").hidden = false; status(""); $("details").replaceChildren(el("p", { class: "hint" }, "Nothing selected.")); } });
 
 // ------------------------------------------------------------------ start: a checked medicine list, or a search
 const START = { medicines: {{ medicines | tojson }}, conditions: {{ conditions | tojson }}, age: {{ age | tojson }},
-                finding: {{ finding | tojson }}, profile: {{ profile | tojson }} };
+                finding: {{ finding | tojson }}, profile: {{ profile | tojson }}, classes: {{ classes | tojson }} };
 if (START.profile.includes(":")) {                 // "Drug:DC:2847" or "Enzyme:CYP3A"
   const at = START.profile.indexOf(":");
   openProfile(START.profile.slice(0, at), START.profile.slice(at + 1));
-} else if (START.medicines.trim()) showMode("risk");
+} else if (START.classes) openClasses(START.classes === "all" ? "" : START.classes);
+else if (START.medicines.trim()) showMode("risk");
 else if ($("q").value.trim()) runSearch();
 </script>
 </body>

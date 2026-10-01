@@ -316,3 +316,11 @@ REPORTED_EFFECTS = (
     r"confusional state|delirium|coma|loss of consciousness|neutropenia|agranulocytosis|pancytopenia|"
     r"thrombocytopenia|lactic acidosis|rhabdomyolysis|stevens-johnson|toxic epidermal necrolysis|anaphyla|angioedema)"
 )
+
+# Everyday names for the 14 main groups of the WHO ATC drug classification (level 1), shown on the drug-class map.
+ATC_GROUPS = {
+    "A": "Digestion & metabolism", "B": "Blood", "C": "Heart & blood vessels", "D": "Skin",
+    "G": "Urinary & sex hormones", "H": "Hormones", "J": "Infections", "L": "Cancer & immune system",
+    "M": "Muscles & joints", "N": "Nervous system", "P": "Parasites", "R": "Breathing", "S": "Eyes & ears",
+    "V": "Other",
+}

@@ -21,6 +21,7 @@ SCHEMA = [
     "CREATE CONSTRAINT enzyme_name IF NOT EXISTS FOR (e:Enzyme) REQUIRE e.name IS UNIQUE",
     "CREATE CONSTRAINT ban_key IF NOT EXISTS FOR (x:Ban) REQUIRE x.key IS UNIQUE",
     "CREATE CONSTRAINT guideline_key IF NOT EXISTS FOR (g:Guideline) REQUIRE g.key IS UNIQUE",
+    "CREATE CONSTRAINT drug_class_code IF NOT EXISTS FOR (c:DrugClass) REQUIRE c.code IS UNIQUE",
     "CREATE INDEX condition_cui IF NOT EXISTS FOR (c:Condition) ON (c.cui)",
     "CREATE INDEX side_effect_cui IF NOT EXISTS FOR (s:SideEffect) ON (s.cui)",
     "CREATE INDEX drug_name IF NOT EXISTS FOR (d:Drug) ON (d.name_lower)",
@@ -39,6 +40,16 @@ STEPS = [
      lambda r: {**r, "atc_classes": [c for c in r["atc_classes"].split(";") if c],
                 "atc_class_names": [c for c in r["atc_class_names"].split(";") if c],
                 "sources": r["sources"].split(";"), "is_alcohol": r["is_alcohol"] == "True"}),
+    ("drug_classes.csv", """
+        UNWIND $rows AS r
+        CREATE (:DrugClass {code: r.code, level: r.level, name: r.name, atc_name: r.atc_name})""",
+     lambda r: {**r, "level": int(r["level"])}),
+    ("drug_classes.csv", """
+        UNWIND $rows AS r
+        MATCH (c:DrugClass {code: r.code}), (p:DrugClass {code: r.parent}) CREATE (c)-[:PART_OF]->(p)""", None),
+    ("belongs_to.csv", """
+        UNWIND $rows AS r
+        MATCH (d:Drug {key: r.drug}), (c:DrugClass {code: r.class}) CREATE (d)-[:BELONGS_TO]->(c)""", None),
     ("enzymes.csv", "UNWIND $rows AS r CREATE (:Enzyme {name: r.name})", None),
     ("conditions.csv", "UNWIND $rows AS r CREATE (:Condition {key: r.key, name: r.name, cui: r.cui})", None),
     ("side_effects.csv", "UNWIND $rows AS r CREATE (:SideEffect {key: r.key, name: r.name, cui: r.cui})", None),

@@ -1,5 +1,5 @@
 """Queries behind the graph explorer page (/graph): a checked medicine list as a risk graph, browse any node and its
-neighbours, see the schema, and the whole drug interaction network. Everything returns plain data that app.py sends to the browser as JSON.
+neighbours, a drug's profile or an enzyme's hub, the drug-class map, and the schema. Everything returns plain data that app.py sends to the browser as JSON.
 
 Nodes are addressed by Neo4j's elementId, so an id is only valid until the database is rebuilt. Relationship types
 cannot be Cypher parameters, so any type coming from the browser is checked against RELATIONSHIPS first.
@@ -13,13 +13,13 @@ from queries import _fulltext
 # every relationship type in the graph, as the browser may ask for them
 RELATIONSHIPS = ["CONTAINS", "INTERACTS_WITH", "INHIBITS", "INDUCES", "METABOLISED_BY", "TREATS",
                  "CONTRAINDICATED_IN", "CAUSES", "HAS_LABEL", "LABEL_MENTIONS", "REPORTED_TOGETHER", "BANNED_UNDER",
-                 "SUBSTITUTE", "FLAGGED_BY"]
+                 "SUBSTITUTE", "FLAGGED_BY", "BELONGS_TO", "PART_OF"]
 # the name shown for a node, whatever its label
 NAME = "coalesce(n.name, n.title, n.notification, 'US label: ' + n.substance, n.key)"
 MAX_LIMIT = 100
 # the property that identifies a node of each label (unique constraint or index)
 KEY_PROPERTY = {"Drug": "key", "Brand": "key", "Condition": "key", "SideEffect": "key", "Enzyme": "name",
-                "Ban": "key", "Guideline": "key"}
+                "Ban": "key", "Guideline": "key", "DrugClass": "code"}
 
 
 def _value(v):
@@ -58,7 +58,7 @@ def schema(driver):
 
 
 def search(driver, text, limit=15):
-    """Medicines, brands, conditions, side effects, enzymes and guidelines whose name matches."""
+    """Medicines, brands, conditions, side effects, enzymes, guidelines, bans and drug classes whose name matches."""
     q = _fulltext(text)
     if not q:
         return []
@@ -69,8 +69,8 @@ def search(driver, text, limit=15):
             WHERE NOT coalesce(n.discontinued, false)
             RETURN n, {NAME} AS name""", q=q, limit=limit).records]
     found += [_node(r["n"], r["name"]) for r in driver.execute_query(f"""
-        MATCH (n) WHERE (n:SideEffect OR n:Enzyme OR n:Guideline OR n:Ban)
-          AND toLower({NAME}) CONTAINS toLower($t)
+        MATCH (n) WHERE (n:SideEffect OR n:Enzyme OR n:Guideline OR n:Ban OR n:DrugClass)
+          AND (toLower({NAME}) CONTAINS toLower($t) OR toLower(coalesce(n.atc_name, '')) CONTAINS toLower($t))
         RETURN n, {NAME} AS name ORDER BY size({NAME}) LIMIT $limit""", t=text.strip(), limit=limit).records]
     return found[:limit * 2]
 
@@ -237,6 +237,11 @@ def _drug_profile(driver, key):
         RETURN r, n, {NAME} AS name ORDER BY n.name"""),
         count("MATCH (:Drug {key: $k})-[r:INHIBITS|INDUCES|METABOLISED_BY]->() RETURN count(r) AS c"))
 
+    box("classes", "Type of medicine", q(f"""
+        MATCH (d:Drug {{key: $k}})-[r:BELONGS_TO]->(n:DrugClass) RETURN r, n, {NAME} AS name ORDER BY n.code"""),
+        count("MATCH (:Drug {key: $k})-[r:BELONGS_TO]->() RETURN count(r) AS c"),
+        note="drug classes (WHO ATC); click one to see what its group interacts with")
+
     severities = {r["s"]: r["c"] for r in q("""
         MATCH (:Drug {key: $k})-[x:INTERACTS_WITH]-(o:Drug) WHERE NOT o.is_alcohol
         RETURN x.severity AS s, count(*) AS c""")}
@@ -306,18 +311,107 @@ def _enzyme_hub(driver, name):
     return out
 
 
-@lru_cache(maxsize=2)
-def drug_network(driver, severity="Major"):
-    """Every drug with at least one interaction of this severity, and those interactions: the whole-picture view.
-    Kept small for the browser: interactions are pairs of positions in the node list, not ids."""
-    severity = severity if severity in ("Major", "Moderate") else "Major"
-    pairs = [(r["a"], r["b"]) for r in driver.execute_query("""
-        MATCH (a:Drug)-[x:INTERACTS_WITH {severity: $s}]->(b:Drug) WHERE NOT a.is_alcohol AND NOT b.is_alcohol
-        RETURN elementId(a) AS a, elementId(b) AS b""", s=severity).records]
-    nodes = [r.data() for r in driver.execute_query("""
-        MATCH (d:Drug) WHERE elementId(d) IN $ids
-        RETURN elementId(d) AS id, d.name AS name, toInteger(coalesce(d.risk_score, 0)) AS risk,
-               coalesce(left(d.atc_classes[0], 1), '?') AS group ORDER BY d.name""",
-        ids=list({i for pair in pairs for i in pair})).records]
-    position = {n["id"]: i for i, n in enumerate(nodes)}
-    return {"severity": severity, "nodes": nodes, "edges": [(position[a], position[b]) for a, b in pairs]}
+# ---------------------------------------------------------------- drug-class map
+# How many Major interactions run between types of medicine: the 14 main ATC groups, then inside one group its
+# classes. A pair of drugs counts once for each pair of classes the two drugs belong to (a drug can be in two).
+MAJOR_PAIRS = """
+    MATCH (a:Drug)-[:INTERACTS_WITH {severity: 'Major'}]->(b:Drug)
+    MATCH (a)-[:BELONGS_TO]->(sa:DrugClass)-[:PART_OF]->(ga)
+    MATCH (b)-[:BELONGS_TO]->(sb:DrugClass)-[:PART_OF]->(gb)"""
+# (two MATCH clauses, not one: inside one MATCH a relationship is used once, which would drop every pair of drugs
+# from the same class, since both would need the same PART_OF relationship)
+CLASS_LINKS = {"overview": 105, "group": 40, "subpairs": 10, "examples": 12}
+
+
+@lru_cache(maxsize=1)
+def _classes(driver):
+    """Every drug class: {code: {code, name, atc_name, level, parent, drugs}}. Level 1 is a main group."""
+    return {r["code"]: r.data() for r in driver.execute_query("""
+        MATCH (c:DrugClass) OPTIONAL MATCH (c)-[:PART_OF]->(p)
+        OPTIONAL MATCH (c)<-[:PART_OF*0..1]-(:DrugClass)<-[:BELONGS_TO]-(d:Drug)
+        RETURN c.code AS code, c.name AS name, c.atc_name AS atc_name, c.level AS level, p.code AS parent,
+               count(DISTINCT d) AS drugs ORDER BY code""").records}
+
+
+def _possible(n_a, n_b, same):
+    return n_a * (n_a - 1) // 2 if same else n_a * n_b
+
+
+def _with_share(links, classes):
+    """Adds each link's share: how many of all the possible drug pairs between the two classes are Major."""
+    for link in links:
+        possible = _possible(classes[link["a"]]["drugs"], classes[link["b"]]["drugs"], link["a"] == link["b"])
+        link["share"] = round(link["pairs"] / possible, 4) if possible else 0
+    return links
+
+
+@lru_cache(maxsize=1)
+def class_map(driver):
+    """The 14 main groups and the number of Major drug pairs between every two of them (and inside each)."""
+    classes = _classes(driver)
+    links = [r.data() for r in driver.execute_query(MAJOR_PAIRS + """
+        WITH DISTINCT a, b, CASE WHEN ga.code <= gb.code THEN ga.code ELSE gb.code END AS x,
+                            CASE WHEN ga.code <= gb.code THEN gb.code ELSE ga.code END AS y
+        RETURN x AS a, y AS b, count(*) AS pairs ORDER BY pairs DESC""").records]
+    _with_share(links, classes)
+    groups = [{**c, "within": next((l["pairs"] for l in links if l["a"] == l["b"] == code), 0)}
+              for code, c in classes.items() if c["level"] == 1]
+    return {"groups": groups, "links": [l for l in links if l["a"] != l["b"]][:CLASS_LINKS["overview"]],
+            "pairs": driver.execute_query("""
+                MATCH (a:Drug)-[:INTERACTS_WITH {severity: 'Major'}]->(b:Drug)
+                WHERE (a)-[:BELONGS_TO]->() AND (b)-[:BELONGS_TO]->() RETURN count(*) AS c""").records[0]["c"]}
+
+
+@lru_cache(maxsize=32)
+def class_group(driver, code):
+    """Inside one main group: its classes, and the classes (in any group) they have the most Major pairs with."""
+    classes = _classes(driver)
+    if classes.get(code, {}).get("level") != 1:
+        return None
+    links = [r.data() for r in driver.execute_query(MAJOR_PAIRS + """
+        WHERE ga.code = $g OR gb.code = $g
+        WITH DISTINCT a, b, sa, sb
+        // a class of this group always comes first; inside the group, the lower code first
+        WITH a, b, CASE WHEN left(sa.code, 1) <> $g OR (left(sb.code, 1) = $g AND sb.code < sa.code) THEN [sb, sa]
+                        ELSE [sa, sb] END AS pair
+        RETURN pair[0].code AS a, pair[1].code AS b, count(*) AS pairs ORDER BY pairs DESC, a, b""",
+        g=code).records]
+    _with_share(links, classes)
+    inside = [c for c in classes.values() if c["parent"] == code]
+    return {"group": classes[code], "classes": inside, "links": links[:CLASS_LINKS["group"]], "all_links": len(links),
+            "partners": [classes[c] for c in sorted({l["b"] for l in links[:CLASS_LINKS["group"]]}) if c[0] != code]}
+
+
+def class_pair(driver, a, b):
+    """The Major drug pairs between two classes (main groups or classes): totals, the class pairs that make them
+    up (for two main groups), and example drug pairs, medicines sold in India first."""
+    classes = _classes(driver)
+    if a not in classes or b not in classes:
+        return None
+    match = """
+        MATCH (ca:DrugClass {code: $a}), (cb:DrugClass {code: $b})
+        MATCH (x:Drug)-[:BELONGS_TO]->(sx:DrugClass)-[:PART_OF*0..1]->(ca)
+        MATCH (x)-[:INTERACTS_WITH {severity: 'Major'}]-(y:Drug)-[:BELONGS_TO]->(sy:DrugClass)-[:PART_OF*0..1]->(cb)
+        WITH DISTINCT CASE WHEN $a = $b AND y.key < x.key THEN [y, x] ELSE [x, y] END AS d, sx, sy"""
+    total = driver.execute_query(match + " RETURN count(DISTINCT d) AS c", a=a, b=b).records[0]["c"]
+    subpairs = []
+    if classes[a]["level"] == 1 or classes[b]["level"] == 1:
+        subpairs = [r.data() for r in driver.execute_query(match + """
+            WITH d, CASE WHEN $a = $b AND sy.code < sx.code THEN [sy.code, sx.code] ELSE [sx.code, sy.code] END AS s
+            WITH DISTINCT d, s
+            RETURN s[0] AS a, s[1] AS b, count(*) AS pairs ORDER BY pairs DESC, a, b LIMIT $limit""",
+            a=a, b=b, limit=CLASS_LINKS["subpairs"]).records]
+        for s in subpairs:
+            s["a_name"], s["b_name"] = classes[s["a"]]["name"], classes[s["b"]]["name"]
+    examples = [r.data() for r in driver.execute_query(match + """
+        WITH DISTINCT d[0] AS x, d[1] AS y
+        WITH x, y, EXISTS { (:Brand {source: 'india_az', discontinued: false})-[:CONTAINS]->(x) } AND
+                   EXISTS { (:Brand {source: 'india_az', discontinued: false})-[:CONTAINS]->(y) } AS india
+        RETURN x.key AS a_key, x.name AS a_name, y.key AS b_key, y.name AS b_name, india
+        ORDER BY india DESC, coalesce(x.risk_score, 0) + coalesce(y.risk_score, 0) DESC LIMIT $limit""",
+        a=a, b=b, limit=CLASS_LINKS["examples"]).records]
+    same = a == b
+    possible = _possible(classes[a]["drugs"], classes[b]["drugs"], same)
+    return {"a": classes[a], "b": classes[b], "pairs": total, "possible": possible,
+            "share": round(total / possible, 4) if possible else 0,
+            "subpairs": subpairs, "examples": examples}

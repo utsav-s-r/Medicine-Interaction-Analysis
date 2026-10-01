@@ -56,12 +56,17 @@ Start the web page, then open http://localhost:5050
 The **Graph explorer** is at http://localhost:5050/graph. After a check, "see them as a graph" opens the
 **Risks** view: the medicine list with only the connections that produced its warnings (nothing else), and
 "show path" next to a warning opens just that warning's path. **Profile** shows a drug's meaningful connections in
-labelled boxes (liver enzymes, serious interactions, what it treats, conditions it is unsafe with, Beers rules, its
-label, how many brands), or a liver enzyme's hub (the drugs that block it, speed it up, or are cleared by it, and how
+labelled boxes (its type of medicine, liver enzymes, serious interactions, what it treats, conditions it is unsafe
+with, Beers rules, its label, how many brands), or a liver enzyme's hub (the drugs that block it, speed it up, or are cleared by it, and how
 many of those pairs have no direct interaction record). Searching a drug or enzyme opens its profile, and every
-ingredient on the check page links to one. **Explore** browses any node and its neighbours;
-**Schema** shows the node and relationship types. The page loads its drawing libraries (Cytoscape.js, Sigma.js)
-from the jsDelivr CDN, so it needs an internet connection.
+ingredient on the check page links to one. **Drug classes** shows which types of medicine clash most: the 14 main
+groups of the WHO ATC classification, linked by how many drug pairs between them have a Major interaction (or what
+share of all possible pairs). Open a group to see its classes and the classes they clash with, and click a link for
+the classes and example drug pairs behind it (medicines sold in India first), e.g. Blood → antithrombotics ↔
+anti-inflammatories → warfarin + ibuprofen. **Explore** browses any node and its neighbours; **Schema** shows the
+node and relationship types. Links straight to a view: `/graph?profile=Drug:DC:2847`, `/graph?profile=Enzyme:CYP3A`,
+`/graph?classes=all`, `/graph?classes=B`. The page loads its drawing library (Cytoscape.js) from the jsDelivr CDN,
+so it needs an internet connection.
 
 Stop the web page with Ctrl+C. Stop Neo4j with `docker stop medicine-neo4j`.
 
@@ -114,7 +119,7 @@ is worse than a missing one.
 ## Check nothing broke
 
 Run after any change to the data, the queries or `src/curated.py` (about 5 seconds, read-only, needs Neo4j running).
-It prints PASS/FAIL for 105 checks and ends with a count:
+It prints PASS/FAIL for 115 checks and ends with a count:
 
 ```bash
 .venv/bin/python tests/run_regression.py
@@ -134,20 +139,22 @@ It prints PASS/FAIL for 105 checks and ends with a count:
 | `src/load_graph.py` | Loads the graph into Neo4j and ranks drugs with Graph Data Science (degree centrality) |
 | `src/queries.py` | The six features as Cypher queries |
 | `src/app.py`, `templates/index.html` | The Flask web page (medicine check) |
-| `src/explore.py`, `templates/graph.html` | The graph explorer (/graph): the risk graph of a checked list, one warning's path, drug profiles, enzyme hubs, browsing, schema |
+| `src/explore.py`, `templates/graph.html` | The graph explorer (/graph): the risk graph of a checked list, one warning's path, drug profiles, enzyme hubs, the drug-class map, browsing, schema |
 | `.env` | Your Neo4j password (never committed) |
 
 ## Graph model
 
 - **Nodes:** Brand, Drug, Enzyme, Condition, SideEffect, Label (official US drug label), Ban (CDSCO notification),
-  Guideline (one AGS Beers Criteria 2023 criterion)
+  Guideline (one AGS Beers Criteria 2023 criterion), DrugClass (the top two ATC levels: 14 main groups such as
+  Blood, and classes such as antithrombotic agents)
 - **Relationships:** `(Brand)-[:CONTAINS]->(Drug)`, `(Drug)-[:INTERACTS_WITH {severity}]-(Drug)`,
   `(Drug)-[:INHIBITS|INDUCES]->(Enzyme)`, `(Drug)-[:METABOLISED_BY]->(Enzyme)`,
   `(Drug)-[:TREATS]->(Condition)`, `(Drug)-[:CONTRAINDICATED_IN]->(Condition)`, `(Drug)-[:CAUSES]->(SideEffect)`,
   `(Drug)-[:HAS_LABEL]->(Label)`, `(Drug)-[:LABEL_MENTIONS {sentences}]->(Drug)` (A's label names B),
   `(Drug)-[:REPORTED_TOGETHER {effects, reports}]-(Drug)` (TWOSIDES), `(Brand)-[:BANNED_UNDER]->(Ban)`,
   `(Brand)-[:SUBSTITUTE {same_strength}]->(Brand)` (same ingredients and strengths, another maker),
-  `(Drug)-[:FLAGGED_BY {side}]->(Guideline)` (Beers; `side` a/b for drug combinations)
+  `(Drug)-[:FLAGGED_BY {side}]->(Guideline)` (Beers; `side` a/b for drug combinations),
+  `(Drug)-[:BELONGS_TO]->(DrugClass)-[:PART_OF]->(DrugClass)` (class, then its main group)
 - Indian brands also carry `uses`, `side_effects`, `habit_forming` and drug class properties
 
 ## Data sources

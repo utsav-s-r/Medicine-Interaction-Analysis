@@ -298,6 +298,44 @@ def main():
           (h["hidden"], hidden))
     check("only drugs and enzymes have profiles", explore.profile(d, "Brand", "IN:1") is None
           and explore.profile(d, "Drug", "no such drug") is None)
+    check("a drug profile shows its type of medicine (warfarin: antithrombotic)",
+          [n["name"] for n in p["nodes"] if n.get("parent") == "classes"] == ["Antithrombotic agents"])
+    print("--- drug-class map")
+    off = d.execute_query("""
+        MATCH (x:Drug) UNWIND coalesce(x.atc_classes, []) AS c WITH x, collect(DISTINCT left(c, 3)) AS want
+        OPTIONAL MATCH (x)-[:BELONGS_TO]->(k:DrugClass) WITH x, want, collect(k.code) AS have
+        WHERE size(want) <> size(have) OR any(w IN want WHERE NOT w IN have) RETURN count(x) AS n""").records[0]["n"]
+    check("every drug belongs to exactly the level-2 classes of its ATC codes", off == 0, off)
+    wrong = d.execute_query("""
+        MATCH (c:DrugClass {level: 2}) OPTIONAL MATCH (c)-[:PART_OF]->(g:DrugClass {level: 1})
+        WITH c, collect(g.code) AS g WHERE g <> [left(c.code, 1)] RETURN collect(c.code) AS bad""").records[0]["bad"]
+    check("every class is part of its own main group", not wrong, wrong)
+    m = explore.class_map(d)
+    # counted again from the drugs' atc_classes property, without the class nodes
+    direct = {(r["a"], r["b"]): r["n"] for r in d.execute_query("""
+        MATCH (a:Drug)-[:INTERACTS_WITH {severity: 'Major'}]->(b:Drug)
+        UNWIND [c IN a.atc_classes | left(c, 1)] AS x UNWIND [c IN b.atc_classes | left(c, 1)] AS y
+        WITH DISTINCT a, b, CASE WHEN x <= y THEN x ELSE y END AS p, CASE WHEN x <= y THEN y ELSE x END AS q
+        RETURN p AS a, q AS b, count(*) AS n""").records}
+    check("pairs inside each main group match a count from the drugs' class codes (same-class pairs included)",
+          all(g["within"] == direct.get((g["code"], g["code"]), 0) for g in m["groups"]),
+          [(g["code"], g["within"], direct.get((g["code"], g["code"]))) for g in m["groups"]])
+    check("pairs between main groups match the same count",
+          all(l["pairs"] == direct[(l["a"], l["b"])] for l in m["links"]) and len(m["groups"]) == 14)
+    check("shares are fractions of the possible pairs", all(0 < l["share"] <= 1 for l in m["links"]))
+    bm = explore.class_pair(d, "B", "M")
+    link = next(l for l in m["links"] if (l["a"], l["b"]) == ("B", "M"))
+    check("a link's details add up to the link (blood <-> muscles & joints)", bm["pairs"] == link["pairs"],
+          (bm["pairs"], link["pairs"]))
+    check("blood thinners + anti-inflammatories make up most of it, with warfarin + an NSAID sold in India",
+          (bm["subpairs"][0]["a"], bm["subpairs"][0]["b"]) == ("B01", "M01") and bm["examples"][0]["india"]
+          and bm["examples"][0]["a_name"] == "warfarin", bm["subpairs"][:1] + bm["examples"][:1])
+    grp = explore.class_group(d, "B")
+    check("a group view lists its own classes first in every link, other groups' classes as partners",
+          all(c["parent"] == "B" for c in grp["classes"]) and all(l["a"][0] == "B" for l in grp["links"])
+          and all(c["code"][0] != "B" for c in grp["partners"]))
+    check("the class map refuses unknown codes", explore.class_group(d, "B01") is None
+          and explore.class_group(d, "Z") is None and explore.class_pair(d, "B", "nope") is None)
     top = queries.top_risk_medicines(d, 5)
     check("GDS risk ranking is populated", len(top) == 5 and top[0]["risk_score"] > 1000, top[:2])
     d.close()

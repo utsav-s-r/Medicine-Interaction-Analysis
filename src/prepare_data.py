@@ -18,7 +18,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from curated import LABEL_CLASS_TERMS
+from curated import ATC_GROUPS, LABEL_CLASS_TERMS
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -589,6 +589,20 @@ def main():
                 ";".join(sorted({atc_names.get(c, "") for c in drug_classes.get(k, ())} - {""})),
                 ";".join(sorted(sources[k])), n.lower() in ("ethanol", "alcohol"))
                for k, n in sorted(drug_names.items())))
+
+    # --- Drug classes: the top two ATC levels as nodes, (Drug)-[:BELONGS_TO]->(level 2)-[:PART_OF]->(level 1).
+    # Built from the same classes as above (combination classes left out), so the class map counts real drug types.
+    names = {}
+    for r in atc_rows:
+        names[r["l1_code"]] = r["l1_name"]
+        names[r["l2_code"]] = r["l2_name"]
+    belongs = sorted({(k, c[:3]) for k, classes in drug_classes.items() if k in drug_names for c in classes})
+    used = sorted({c for _, c in belongs})
+    groups = sorted({c[0] for c in used})
+    write_csv("drug_classes.csv", ["code", "level", "name", "atc_name", "parent"],
+              [(g, 1, ATC_GROUPS[g], names[g].capitalize(), "") for g in groups] +
+              [(c, 2, names[c].capitalize(), names[c].capitalize(), c[0]) for c in used])
+    write_csv("belongs_to.csv", ["drug", "class"], belongs)
     print("Done.")
 
 
