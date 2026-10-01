@@ -7,6 +7,7 @@ cannot be Cypher parameters, so any type coming from the browser is checked agai
 from collections import defaultdict
 from functools import lru_cache
 
+from curated import CONDITION_GROUPS
 from queries import _fulltext
 
 # every relationship type in the graph, as the browser may ask for them
@@ -174,6 +175,135 @@ def risk_graph(driver, result):
             nodes[f"{label}:{r['key']}"]["eid"] = r["eid"]
     return {"nodes": list(nodes.values()), "edges": list(edges.values()), "findings": findings,
             "level": result["level"], "score": result["score"]}
+
+
+# ---------------------------------------------------------------- profiles: one node and its meaningful neighbours
+
+# how many neighbours a profile box shows; the box always says how many there are in all
+PROFILE_LIMIT = {"interactions": 10, "conditions": 8, "enzyme": 30}
+STRENGTH_ORDER = "CASE coalesce(r.strength, r.sensitivity) WHEN 'strong' THEN 0 WHEN 'sensitive' THEN 0 " \
+                 "WHEN 'moderate' THEN 1 ELSE 2 END"
+
+
+@lru_cache(maxsize=1)
+def _everyday_conditions():
+    """Condition names behind the everyday words people type ("sugar", "BP"): shown first in a profile."""
+    return sorted({n for _, names in CONDITION_GROUPS.values() for n in names})
+
+
+def profile(driver, label, key):
+    """A drug's profile or an enzyme's hub, or None for other node types (or an unknown node)."""
+    if label == "Drug":
+        return _drug_profile(driver, key)
+    if label == "Enzyme":
+        return _enzyme_hub(driver, key)
+    return None
+
+
+def _boxes():
+    """Collects a profile: the centre, then boxes of neighbours. Box nodes are Cytoscape compound parents."""
+    out = {"nodes": [], "edges": [], "boxes": []}
+
+    def box(box_id, title, records, total, note=""):
+        if not records:
+            return
+        out["boxes"].append({"id": box_id, "title": title, "shown": len(records), "total": total, "note": note})
+        out["nodes"].append({"id": box_id, "label": "Box", "name": f"{title} · {len(records)} of {total}"
+                             if total > len(records) else f"{title} · {total}", "props": {}, "box": True})
+        for r in records:
+            n = _node(r["n"], r["name"])
+            out["nodes"].append({**n, "parent": box_id, "eid": n["id"], "id": f"{box_id}/{n['id']}"})
+            e = _edge(r["r"])
+            e["source"], e["target"] = (out["center"]["id"], f"{box_id}/{n['id']}") if e["source"] == out["center"]["id"] \
+                else (f"{box_id}/{n['id']}", out["center"]["id"])
+            e["id"] = f"{box_id}/{e['id']}"
+            out["edges"].append(e)
+    return out, box
+
+
+def _drug_profile(driver, key):
+    records = driver.execute_query(f"MATCH (n:Drug {{key: $k}}) RETURN n, {NAME} AS name", k=key).records
+    if not records:
+        return None
+    out, box = _boxes()
+    center = _node(records[0]["n"], records[0]["name"])
+    out["center"] = {**center, "eid": center["id"]}
+    out["nodes"].append(out["center"])
+    q = lambda cypher, **kw: driver.execute_query(cypher, k=key, **kw).records
+    count = lambda cypher: driver.execute_query(cypher, k=key).records[0]["c"]
+
+    box("enzymes", "Liver enzymes", q(f"""
+        MATCH (d:Drug {{key: $k}})-[r:INHIBITS|INDUCES|METABOLISED_BY]->(n:Enzyme)
+        RETURN r, n, {NAME} AS name ORDER BY n.name"""),
+        count("MATCH (:Drug {key: $k})-[r:INHIBITS|INDUCES|METABOLISED_BY]->() RETURN count(r) AS c"))
+
+    severities = {r["s"]: r["c"] for r in q("""
+        MATCH (:Drug {key: $k})-[x:INTERACTS_WITH]-(o:Drug) WHERE NOT o.is_alcohol
+        RETURN x.severity AS s, count(*) AS c""")}
+    box("interactions", "Serious interactions", q(f"""
+        MATCH (d:Drug {{key: $k}})-[r:INTERACTS_WITH {{severity: 'Major'}}]-(n:Drug) WHERE NOT n.is_alcohol
+        RETURN r, n, {NAME} AS name
+        ORDER BY EXISTS {{ (:Brand {{source: 'india_az', discontinued: false}})-[:CONTAINS]->(n) }} DESC,
+                 n.risk_score DESC LIMIT $limit""", limit=PROFILE_LIMIT["interactions"]),
+        severities.get("Major", 0),
+        note=", ".join(f"{severities[s]:,} {s.lower()}" for s in ("Major", "Moderate", "Minor", "Unknown")
+                       if severities.get(s)) + " interactions in all; the box shows Major ones, "
+                                               "medicines sold in India first")
+
+    for rel, box_id, title in (("TREATS", "treats", "Treats"), ("CONTRAINDICATED_IN", "unsafe", "Unsafe with")):
+        box(box_id, title, q(f"""
+            MATCH (d:Drug {{key: $k}})-[r:{rel}]->(n:Condition)
+            RETURN r, n, {NAME} AS name ORDER BY n.name IN $everyday DESC, size(n.name) LIMIT $limit""",
+            everyday=_everyday_conditions(), limit=PROFILE_LIMIT["conditions"]),
+            count(f"MATCH (:Drug {{key: $k}})-[r:{rel}]->() RETURN count(r) AS c"),
+            note="everyday conditions first")
+
+    box("beers", "Older adults (Beers 65+)", q(f"""
+        MATCH (d:Drug {{key: $k}})-[r:FLAGGED_BY]->(n:Guideline) RETURN r, n, {NAME} AS name ORDER BY n.table, n.key"""),
+        count("MATCH (:Drug {key: $k})-[r:FLAGGED_BY]->() RETURN count(r) AS c"))
+    box("label", "Official US label", q(f"""
+        MATCH (d:Drug {{key: $k}})-[r:HAS_LABEL]->(n:Label) RETURN r, n, {NAME} AS name"""), 1)
+
+    # Indian brands: one summary, not thousands of nodes
+    brands = q("""
+        MATCH (:Drug {key: $k})<-[:CONTAINS]-(b:Brand)
+        RETURN count(b) AS brands, count(CASE WHEN NOT b.discontinued THEN 1 END) AS sold,
+               count(CASE WHEN EXISTS { (b)-[:BANNED_UNDER]->() } THEN 1 END) AS banned,
+               count(CASE WHEN b.jan_aushadhi THEN 1 END) AS jan_aushadhi""")[0].data()
+    if brands["brands"]:
+        out["nodes"].append({"id": "brands", "label": "Brand", "derived": True,
+                             "name": f"{brands['brands']:,} brands" + (f" · {brands['banned']} banned" if brands["banned"] else ""),
+                             "props": {"brands in the data": brands["brands"], "still sold (2022)": brands["sold"],
+                                       "banned combinations": brands["banned"],
+                                       "Jan Aushadhi generics": brands["jan_aushadhi"]}})
+        out["edges"].append({"id": "brands-edge", "type": "CONTAINS", "source": "brands", "target": out["center"]["id"],
+                             "props": {}, "derived": True})
+    return out
+
+
+def _enzyme_hub(driver, name):
+    records = driver.execute_query(f"MATCH (n:Enzyme {{name: $k}}) RETURN n, {NAME} AS name", k=name).records
+    if not records:
+        return None
+    out, box = _boxes()
+    center = _node(records[0]["n"], records[0]["name"])
+    out["center"] = {**center, "eid": center["id"]}
+    out["nodes"].append(out["center"])
+    for rel, box_id, title in (("INHIBITS", "blocked", "Blocked by"), ("INDUCES", "sped", "Sped up by"),
+                               ("METABOLISED_BY", "clears", "Clears")):
+        records = driver.execute_query(f"""
+            MATCH (n:Drug)-[r:{rel}]->(:Enzyme {{name: $k}})
+            RETURN r, n, {NAME} AS name ORDER BY {STRENGTH_ORDER}, n.name LIMIT $limit""",
+            k=name, limit=PROFILE_LIMIT["enzyme"]).records
+        total = driver.execute_query(f"MATCH (:Drug)-[r:{rel}]->(:Enzyme {{name: $k}}) RETURN count(r) AS c",
+                                     k=name).records[0]["c"]
+        box(box_id, title, records, total, note="strongest first")
+    pairs = driver.execute_query("""
+        MATCH (a:Drug)-[:INHIBITS|INDUCES]->(:Enzyme {name: $k})<-[:METABOLISED_BY]-(b:Drug) WHERE a <> b
+        RETURN count(*) AS pairs, count(CASE WHEN NOT (a)-[:INTERACTS_WITH]-(b) THEN 1 END) AS hidden""",
+        k=name).records[0]
+    out["pairs"], out["hidden"] = pairs["pairs"], pairs["hidden"]
+    return out
 
 
 @lru_cache(maxsize=2)

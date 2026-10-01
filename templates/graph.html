@@ -88,6 +88,7 @@
   <nav><a href="/">Medicine check</a></nav>
   <div class="tabs" role="group" aria-label="View">
     <button type="button" data-mode="risk" aria-pressed="false">Risks</button>
+    <button type="button" data-mode="profile" aria-pressed="false">Profile</button>
     <button type="button" data-mode="explore" aria-pressed="true">Explore</button>
     <button type="button" data-mode="network" aria-pressed="false">Drug network</button>
     <button type="button" data-mode="schema" aria-pressed="false">Schema</button>
@@ -106,6 +107,12 @@
       <p class="hint" id="riskSummary"></p>
       <div class="row"><button class="btn" id="showAll" type="button">Show all warnings</button></div>
       <div class="findings" id="findingList"></div>
+    </div>
+    <div id="profileSide" hidden>
+      <div class="row"><button class="btn" id="back" type="button" hidden>← Back</button></div>
+      <h2 id="profileTitle">Profile</h2>
+      <p class="hint" id="profileSummary">Search a medicine or a liver enzyme (e.g. CYP3A) above to see its profile.</p>
+      <div class="findings" id="profileBoxes"></div>
     </div>
     <div id="exploreSide">
       <h2>Show relationships</h2>
@@ -206,7 +213,9 @@ const cy = cytoscape({
     { selector: "node:selected", style: { "border-width": 3, "border-color": css("--accent"), "width": 24, "height": 24 } },
     { selector: "node.focus", style: { "width": 26, "height": 26, "font-weight": "bold" } },
     { selector: "edge", style: {
-        "width": e => e.data("props").severity === "Major" ? 2.5 : 1.4, "line-color": edgeColor,
+        "width": e => { const p = e.data("props"), s = p.strength || p.sensitivity;
+                        return p.severity === "Major" || s === "strong" || s === "sensitive" ? 2.5 : s === "moderate" ? 1.8 : 1.2; },
+        "line-color": edgeColor,
         "target-arrow-color": edgeColor, "target-arrow-shape": "triangle", "arrow-scale": 0.7, "curve-style": "bezier",
         "opacity": 0.8 } },
     { selector: "edge[type = 'LABEL_MENTIONS'], edge[type = 'REPORTED_TOGETHER'], edge[type = 'SUBSTITUTE'], edge[type = 'FLAGGED_BY']",
@@ -217,6 +226,12 @@ const cy = cytoscape({
     { selector: "node[?derived]", style: { "background-opacity": 0.15, "border-width": 2, "border-style": "dashed",
         "border-color": css("--Class") } },
     { selector: "node.context, edge.context", style: { "opacity": 0.4 } },
+    // profile boxes: one labelled box per kind of connection
+    { selector: "node[?box]", style: { "shape": "round-rectangle", "background-color": css("--card"),
+        "background-opacity": 0.6, "border-width": 1, "border-color": css("--line"), "label": "data(name)",
+        "text-valign": "top", "text-halign": "center", "text-margin-y": -4, "font-size": 11, "font-weight": "bold",
+        "color": css("--muted"), "padding": 16, "text-background-opacity": 0 } },
+    { selector: "node.center", style: { "width": 34, "height": 34, "font-size": 13, "font-weight": "bold" } },
     { selector: "edge:selected", style: { "width": 4, "line-color": css("--accent"), "target-arrow-color": css("--accent") } },
     { selector: ".hidden", style: { "display": "none" } },
   ],
@@ -270,7 +285,8 @@ async function openNode(item, { expandIt = true } = {}) {
   if (expandIt) await expand(item.id);
   else cy.animate({ center: { eles: node }, zoom: 1.2, duration: 300 });
 }
-cy.on("tap", "node", e => mode === "risk" ? showRiskNode(e.target.data()) : showNode(e.target.id()));
+cy.on("tap", "node", e => mode === "risk" ? showRiskNode(e.target.data()) : mode === "profile" ? profileTap(e.target)
+                                                                                         : showNode(e.target.id()));
 cy.on("dbltap", "node", e => { if (mode === "explore") expand(e.target.id()); });
 cy.on("tap", "edge", e => mode === "risk" ? showRiskEdge(e.target.data()) : showEdge(e.target.data()));
 
@@ -307,6 +323,9 @@ async function showNode(id, { before = [] } = {}) {
           "Remove"))
       : el("div", { class: "row" }, el("button", { class: "btn", type: "button",
           onclick: () => openNode({ id, label: n.label, name: n.name, props: n.props }) }, "Explore its connections"));
+    if (hasProfile(n.label) && !(mode === "profile" && profileData && profileData.center.eid === id))
+      actions.prepend(el("button", { class: "btn primary", type: "button",
+        onclick: () => openProfile(n.label, profileKey(n)) }, n.label === "Enzyme" ? "Open enzyme hub" : "Open profile"));
     box.replaceChildren(
       el("div", { class: "pill" }, el("span", { class: "swatch", style: { background: css("--" + n.label) } }), n.label),
       el("h3", { style: { margin: "8px 0 4px", fontSize: "17px", overflowWrap: "anywhere" } }, n.name),
@@ -433,6 +452,90 @@ function showRiskEdge(e) {
 }
 $("showAll").addEventListener("click", showAllFindings);
 
+// ------------------------------------------------------------------ profile view: a drug's profile or an enzyme's hub
+let profileData = null, profileTrail = [];
+// which relationship types each box holds, for "see all in Explore"
+const BOX_TYPES = { enzymes: ["INHIBITS", "INDUCES", "METABOLISED_BY"], interactions: ["INTERACTS_WITH"],
+  treats: ["TREATS"], unsafe: ["CONTRAINDICATED_IN"], beers: ["FLAGGED_BY"], label: ["HAS_LABEL"],
+  blocked: ["INHIBITS"], sped: ["INDUCES"], clears: ["METABOLISED_BY"] };
+const profileKey = n => n.label === "Enzyme" ? n.props.name : n.props.key;     // how a node is addressed in a profile
+const hasProfile = label => label === "Drug" || label === "Enzyme";
+async function openProfile(label, key, { remember = true } = {}) {
+  if (remember && profileData) profileTrail.push([profileData.center.label, profileKey(profileData.center)]);
+  showMode("profile", { load: false });
+  status("Loading the profile…");
+  try {
+    profileData = await api("/api/graph/profile", { label, key });
+    renderProfile();
+  } catch (err) { status(err.message); }
+}
+function renderProfile() {
+  const p = profileData;
+  cy.elements().remove();
+  cy.add(p.nodes.map(n => ({ group: "nodes", data: { ...n, short: short(n.name) } })));
+  cy.add(p.edges.map(e => ({ group: "edges", data: e })));
+  cy.getElementById(p.center.id).addClass("center");
+  placeBoxes();
+  $("empty").hidden = true;
+  $("back").hidden = !profileTrail.length;
+  $("profileTitle").textContent = `${p.center.label === "Enzyme" ? "Liver enzyme" : "Drug"}: ${p.center.name}`;
+  $("profileSummary").textContent = p.center.label === "Enzyme"
+    ? `${p.pairs.toLocaleString()} pairs of a drug that blocks or speeds up ${p.center.name} and a drug it clears; ` +
+      `${p.hidden.toLocaleString()} of them have no direct interaction record. The medicine check warns about those as hidden enzyme interactions.`
+    : "Its meaningful connections, grouped. Click a drug or an enzyme to open its own profile.";
+  $("profileBoxes").replaceChildren(...p.boxes.map(b => el("button", { type: "button", onclick: () => showBox(b) },
+    el("span", { class: "points" }, b.total > b.shown ? `${b.shown}/${b.total}` : b.total), el("span", {}, b.title))));
+  status(p.center.label === "Enzyme" ? "Thicker lines: stronger effect. Click a drug for its profile."
+                                     : "Click a box title for what it holds, or any drug or enzyme to open its profile.");
+  showNode(p.center.eid);
+}
+function placeBoxes() {
+  // the centre in the middle, the boxes in a ring around it, each box's nodes on a grid inside it
+  const boxes = cy.nodes("[?box]"), single = cy.nodes().filter(n => !n.data("box") && !n.data("parent") && !n.hasClass("center"));
+  const ring = [...boxes, ...single], sizes = new Map();
+  boxes.forEach(b => {
+    const n = b.children().length, cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols);
+    sizes.set(b.id(), { cols, w: cols * 135, h: rows * 56 });
+  });
+  // the ring is just big enough for the boxes to sit side by side around the centre
+  const extent = item => { const z = sizes.get(item.id()); return z ? Math.max(z.w, z.h) : 60; };
+  const around = ring.reduce((sum, item) => sum + extent(item), 0);
+  const radius = Math.max(around * 1.2 / (2 * Math.PI), Math.max(...ring.map(extent)) / 2 + 130);
+  cy.getElementById(profileData.center.id).position({ x: 0, y: 0 });
+  ring.forEach((item, i) => {
+    const a = -Math.PI / 2 + (2 * Math.PI * i) / ring.length, x = radius * Math.cos(a), y = radius * Math.sin(a);
+    const size = sizes.get(item.id());
+    if (!size) { item.position({ x, y }); return; }
+    item.children().layout({ name: "grid", cols: size.cols, avoidOverlap: true, animate: false, condense: true,
+      boundingBox: { x1: x - size.w / 2, y1: y - size.h / 2, w: size.w, h: size.h } }).run();
+  });
+  requestAnimationFrame(() => cy.fit(cy.elements(), 30));     // after the boxes have taken their new size
+}
+function showBox(b) {
+  const types = BOX_TYPES[b.id] || [];
+  const center = profileData.center;
+  $("details").replaceChildren(...[el("div", { class: "pill" }, "Group"), el("h3", { style: { margin: "8px 0 4px" } }, b.title),
+    el("p", {}, b.total > b.shown ? `Showing ${b.shown} of ${b.total.toLocaleString()}.` : `All ${b.total} shown.`),
+    b.note ? el("p", { class: "hint" }, b.note) : null,
+    el("div", { class: "findings" }, cy.getElementById(b.id).children().map(n => el("button", { type: "button",
+      onclick: () => n.emit("tap") }, el("span", { class: "swatch", style: { background: css("--" + n.data("label")) } }),
+      el("span", {}, n.data("name"))))),
+    b.total > b.shown && types.length ? el("div", { class: "row" }, el("button", { class: "btn", type: "button",
+      onclick: async () => { $("limit").value = "100";
+        await openNode({ id: center.eid, label: center.label, name: center.name, props: center.props }, { expandIt: false });
+        expand(center.eid, types); } }, `See up to 100 in Explore`)) : null].filter(Boolean));
+}
+function profileTap(n) {
+  const d = n.data();
+  if (d.box) return showBox(profileData.boxes.find(b => b.id === d.id));
+  if (n.hasClass("center")) return showNode(d.eid);
+  if (hasProfile(d.label) && d.eid) return openProfile(d.label, profileKey(d));
+  if (d.eid) return showNode(d.eid);
+  $("details").replaceChildren(el("div", { class: "pill" }, "Summary"), el("h3", { style: { margin: "8px 0 4px" } }, d.name),
+    el("p", { class: "hint" }, "A count, not a single node: there are too many brands to draw."), props(d.props));
+}
+$("back").addEventListener("click", () => { const [label, key] = profileTrail.pop(); openProfile(label, key, { remember: false }); });
+
 // ------------------------------------------------------------------ search
 let timer;
 $("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(runSearch, 220); });
@@ -446,7 +549,8 @@ async function runSearch() {
   if (text.length < 2) { box.style.display = "none"; return; }
   const found = await api("/api/graph/search", { q: text });
   box.replaceChildren(...(found.length ? found.map(item => el("button", { type: "button", role: "option",
-      onclick: () => { box.style.display = "none"; openNode(item); } },
+      onclick: () => { box.style.display = "none";
+        hasProfile(item.label) ? openProfile(item.label, profileKey(item)) : openNode(item); } },
       el("span", { class: "swatch", style: { background: css("--" + item.label) } }),
       el("span", {}, item.name), el("span", { class: "hint", style: { marginLeft: "auto" } }, item.label)))
     : [el("div", { class: "hint", style: { padding: "8px 10px" } }, "No match")]));
@@ -516,7 +620,8 @@ async function showSchema() {
 
 // ------------------------------------------------------------------ switching views
 let mode = "explore", saved = null;
-function showMode(next) {
+function showMode(next, { load = true } = {}) {
+  // load: draw the view's content now (openProfile switches first, then draws the profile it fetched)
   if (next === mode) return;
   if (mode === "explore") saved = cy.elements().jsons();                 // keep the exploration when leaving
   if (mode === "risk" && focused === null) riskPositions = savePositions();
@@ -527,6 +632,7 @@ function showMode(next) {
   $("sg").style.display = next === "network" ? "block" : "none";
   $("riskSide").hidden = next !== "risk";
   $("exploreSide").hidden = next !== "explore";
+  $("profileSide").hidden = next !== "profile";
   status("");
   if (next === "risk") {
     if (!START.medicines.trim()) {
@@ -535,6 +641,11 @@ function showMode(next) {
         el("a", { href: "/" }, "medicine check page"), " first, then use “see them as a graph”."));
     } else if (!risk) loadRisk().catch(err => status(err.message));
     else { showRiskGraph(); if (focused !== null) focusFinding(focused); }
+  } else if (next === "profile") {
+    if (!load) return;
+    if (profileData) renderProfile();
+    else { cy.elements().remove(); $("empty").hidden = false;
+      $("details").replaceChildren(el("p", { class: "hint" }, "Search a medicine or a liver enzyme (e.g. CYP3A) above.")); }
   } else if (next === "explore") {
     cy.elements().remove(); if (saved) cy.add(saved); cy.edges().removeStyle();
     $("empty").hidden = cy.nodes().length > 0; applyTypeFilter();
@@ -548,8 +659,11 @@ $("clear").addEventListener("click", () => { if (mode === "explore") { cy.elemen
 
 // ------------------------------------------------------------------ start: a checked medicine list, or a search
 const START = { medicines: {{ medicines | tojson }}, conditions: {{ conditions | tojson }}, age: {{ age | tojson }},
-                finding: {{ finding | tojson }} };
-if (START.medicines.trim()) showMode("risk");
+                finding: {{ finding | tojson }}, profile: {{ profile | tojson }} };
+if (START.profile.includes(":")) {                 // "Drug:DC:2847" or "Enzyme:CYP3A"
+  const at = START.profile.indexOf(":");
+  openProfile(START.profile.slice(0, at), START.profile.slice(at + 1));
+} else if (START.medicines.trim()) showMode("risk");
 else if ($("q").value.trim()) runSearch();
 </script>
 </body>

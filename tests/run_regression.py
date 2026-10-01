@@ -276,6 +276,28 @@ def main():
               if f["kind"] == "Hidden enzyme interaction"]
     check("a hidden enzyme warning's path goes through the enzyme (ticlopidine -> CYP2C19 <- voriconazole)",
           enzyme and "Enzyme:CYP2C19" in enzyme[0]["nodes"] and len(enzyme[0]["edges"]) == 2, enzyme)
+    print("--- drug profile and enzyme hub")
+    p = explore.profile(d, "Drug", "DC:2847")                                   # warfarin
+    boxes = {b["id"]: b for b in p["boxes"]}
+    check("a drug profile groups its connections into boxes",
+          {"enzymes", "interactions", "treats", "unsafe", "beers", "label"} <= set(boxes), sorted(boxes))
+    check("every box shows at most its limit and says how many there are in all",
+          all(b["shown"] <= max(explore.PROFILE_LIMIT.values()) and b["total"] >= b["shown"] for b in p["boxes"])
+          and boxes["interactions"]["total"] > boxes["interactions"]["shown"], p["boxes"])
+    shown = [e["props"].get("severity") for e in p["edges"] if e["type"] == "INTERACTS_WITH"]
+    check("the interactions box holds only Major interactions", shown and set(shown) == {"Major"}, set(shown))
+    check("Indian brands appear as one summary, not thousands of nodes",
+          sum(n["label"] == "Brand" for n in p["nodes"]) == 1)
+    h = explore.profile(d, "Enzyme", "CYP3A")
+    check("an enzyme hub has its blockers, speeders and the drugs it clears",
+          {b["id"] for b in h["boxes"]} == {"blocked", "sped", "clears"}, h["boxes"])
+    hidden = d.execute_query("""
+        MATCH (a:Drug)-[:INHIBITS|INDUCES]->(:Enzyme {name: 'CYP3A'})<-[:METABOLISED_BY]-(b:Drug)
+        WHERE a <> b AND NOT (a)-[:INTERACTS_WITH]-(b) RETURN count(*) AS n""").records[0]["n"]
+    check("the hub's count of hidden pairs (no direct interaction record) matches the graph", h["hidden"] == hidden,
+          (h["hidden"], hidden))
+    check("only drugs and enzymes have profiles", explore.profile(d, "Brand", "IN:1") is None
+          and explore.profile(d, "Drug", "no such drug") is None)
     top = queries.top_risk_medicines(d, 5)
     check("GDS risk ranking is populated", len(top) == 5 and top[0]["risk_score"] > 1000, top[:2])
     d.close()

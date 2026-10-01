@@ -131,7 +131,7 @@
     {% if result.brands %}<p class="hint" style="margin:0 0 12px">Brand details: 250k Indian medicines
       dataset (Kaggle, CC BY-SA 4.0; prices as of 2022). Ask the pharmacist before switching brands.</p>{% endif %}
     {% for a in result.about %}<div style="margin:0 0 14px">
-      <b>{{ a.drug }}</b>{% if a.url %} <span class="hint">· <a href="{{ a.url }}" target="_blank" rel="noopener">official label</a>{% if a.effective %}, {{ a.effective }}{% endif %}</span>{% endif %}
+      <b>{{ a.drug }}</b> <span class="hint">· <a href="/graph?{{ {'profile': 'Drug:' ~ a.key} | urlencode }}">profile graph</a></span>{% if a.url %} <span class="hint">· <a href="{{ a.url }}" target="_blank" rel="noopener">official label</a>{% if a.effective %}, {{ a.effective }}{% endif %}</span>{% endif %}
       {% if a.used_for %}<p class="meaning"><span class="hint">Used for:</span> {{ a.used_for }}</p>{% endif %}
       {% if a.boxed %}<div class="effect w3"><b>Boxed warning{% if a.boxed_title %}: {{ a.boxed_title }}{% endif %}</b>
         <p>{{ a.boxed }}</p></div>{% endif %}

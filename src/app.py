@@ -44,9 +44,11 @@ def _text(name, limit=200):
 
 @app.get("/graph")
 def graph():
-    """medicines/conditions/age: open the risk graph of that list; finding: open on that one warning's path."""
+    """medicines/conditions/age: open the risk graph of that list; finding: open on that one warning's path;
+    profile: open a drug's profile or an enzyme's hub ("Drug:DC:2847", "Enzyme:CYP3A")."""
     return render_template("graph.html", medicines=_text("medicines", 2000), conditions=_text("conditions", 1000),
-                           age=_text("age", 3), finding=_text("finding", 300), q=_text("q", 100))
+                           age=_text("age", 3), finding=_text("finding", 300), q=_text("q", 100),
+                           profile=_text("profile", 120))
 
 
 @app.get("/api/graph/schema")
@@ -80,6 +82,13 @@ def graph_risk():
         return jsonify({"nodes": [], "edges": [], "findings": []})
     result = queries.analyse(driver, medicines, _lines(_text("conditions", 1000))[:20], None, _age(_text("age", 3)))
     return jsonify(explore.risk_graph(driver, result))
+
+
+@app.get("/api/graph/profile")
+def graph_profile():
+    """A drug's profile or an enzyme's hub: label is Drug or Enzyme, key is the drug key or the enzyme name."""
+    found = explore.profile(driver, _text("label", 20), _text("key", 100))
+    return jsonify(found) if found else abort(404)
 
 
 @app.get("/api/graph/network")

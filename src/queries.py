@@ -584,7 +584,7 @@ def about_medicines(driver, meds):
         boxed = re.sub(r"\s+", " ", r["boxed"] or "").strip()
         # "WARNING: FETAL TOXICITY • When pregnancy ..." -> title "Fetal toxicity"; other labels have no title
         headline = re.match(r"WARNINGS?:\s*((?:[A-Z0-9,;'()/&-]+\s+)+?)(?=[•\[]|[A-Z][a-z])", boxed)
-        out.append({"drug": r["name"], "used_for": _lead(r["indications"], 260, prefer="indicated"),
+        out.append({"drug": r["name"], "key": k, "used_for": _lead(r["indications"], 260, prefer="indicated"),
                     "boxed_title": headline.group(1).strip(" ,;").capitalize() if headline else "",
                     "boxed": _lead((boxed[headline.end():] if headline else boxed).lstrip("• "), 320) if boxed else "",
                     "url": DAILYMED + r["set_id"] if r["set_id"] else "",
