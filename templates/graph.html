@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graph Explorer</title>
+<style>
+  :root { --bg:#f7f7f5; --card:#fff; --text:#1d1d1b; --muted:#6b6b66; --line:#e3e2dd; --accent:#1f4e79; --on-accent:#fff;
+          --major:#b42318; --moderate:#b54708; --minor:#98a2b3;
+          --Drug:#2563eb; --Brand:#0d9488; --Condition:#9333ea; --SideEffect:#db2777; --Enzyme:#a16207;
+          --Label:#64748b; --Ban:#dc2626; --Guideline:#ea580c; --Class:#78716c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161615; --card:#1f1f1d; --text:#ecebe6; --muted:#a3a29c; --line:#34332f; --accent:#84adff; --on-accent:#0b1b33;
+            --major:#f97066; --moderate:#fdb022; --minor:#667085;
+            --Drug:#60a5fa; --Brand:#2dd4bf; --Condition:#c084fc; --SideEffect:#f472b6; --Enzyme:#facc15;
+            --Label:#94a3b8; --Ban:#f87171; --Guideline:#fb923c; --Class:#a8a29e; } }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, system-ui, sans-serif;
+         display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0; }
+  header nav a { color: var(--accent); margin-right: 12px; }
+  .tabs { display: flex; gap: 4px; }
+  .tabs button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text);
+                 font: inherit; cursor: pointer; }
+  .tabs button[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  .search { position: relative; flex: 1 1 260px; max-width: 420px; }
+  .search input { width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card);
+                  color: var(--text); font: inherit; }
+  .results { position: absolute; z-index: 10; top: 100%; left: 0; right: 0; margin-top: 4px; background: var(--card);
+             border: 1px solid var(--line); border-radius: 8px; max-height: 320px; overflow: auto; display: none; }
+  .results button { display: flex; gap: 8px; align-items: center; width: 100%; text-align: left; padding: 7px 10px;
+                    border: 0; background: none; color: var(--text); font: inherit; cursor: pointer; }
+  .results button:hover, .results button:focus { background: var(--bg); }
+  main { flex: 1; display: grid; grid-template-columns: 220px 1fr 340px; min-height: 0; }
+  aside { overflow: auto; padding: 12px 14px; border-right: 1px solid var(--line); }
+  aside.details { border-right: 0; border-left: 1px solid var(--line); }
+  #stage { position: relative; min-height: 0; }
+  #cy, #sg { position: absolute; inset: 0; }
+  #sg { display: none; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 6px; }
+  h2:first-child { margin-top: 0; }
+  label.check { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .line { display: inline-block; width: 16px; height: 0; border-top: 2px solid var(--muted); flex: none; }
+  .hint { color: var(--muted); font-size: 12.5px; }
+  .muted { color: var(--muted); }
+  select, .btn { padding: 5px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text);
+                 font: inherit; cursor: pointer; }
+  .btn.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 10px; margin: 8px 0; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
+  .long { max-height: 9em; overflow: auto; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line);
+          border-radius: 6px; padding: 6px 8px; font-size: 13px; }
+  .degree { width: 100%; border-collapse: collapse; } .degree td { padding: 3px 0; border-top: 1px solid var(--line); }
+  .degree td:last-child { text-align: right; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line); font-size: 12.5px; }
+  .findings { display: flex; flex-direction: column; gap: 4px; }
+  .findings button { display: flex; gap: 8px; align-items: flex-start; width: 100%; text-align: left; padding: 6px 8px;
+                     border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text);
+                     font: inherit; font-size: 13px; cursor: pointer; }
+  .findings button[aria-current="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .points { flex: none; min-width: 18px; font-weight: 700; text-align: center; }
+  .w3 { color: var(--major); } .w2 { color: var(--moderate); } .w1, .w0 { color: var(--muted); }
+  blockquote { margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  blockquote p { margin: 0; } blockquote cite { display: block; margin-top: 4px; font-style: normal; font-size: 12.5px; color: var(--muted); }
+  .box { margin: 8px 0 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  .box p { margin: 2px 0 0; }
+  .status { position: absolute; left: 12px; bottom: 10px; padding: 4px 10px; border-radius: 8px; background: var(--card);
+            border: 1px solid var(--line); font-size: 12.5px; color: var(--muted); pointer-events: none; }
+  .empty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 24px; color: var(--muted); }
+  .empty p { max-width: 420px; }
+  @media (max-width: 900px) {   /* phone: the page scrolls; graph first, then details, then the filters */
+    body { display: block; height: auto; }
+    main { display: flex; flex-direction: column; }
+    #stage { order: 1; height: 65vh; border-bottom: 1px solid var(--line); }
+    aside.details { order: 2; border: 0; border-bottom: 1px solid var(--line); }
+    aside { order: 3; border: 0; overflow: visible; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Graph Explorer</h1>
+  <nav><a href="/">Medicine check</a></nav>
+  <div class="tabs" role="group" aria-label="View">
+    <button type="button" data-mode="risk" aria-pressed="false">Risks</button>
+    <button type="button" data-mode="explore" aria-pressed="true">Explore</button>
+    <button type="button" data-mode="network" aria-pressed="false">Drug network</button>
+    <button type="button" data-mode="schema" aria-pressed="false">Schema</button>
+  </div>
+  <div class="search">
+    <input id="q" type="search" placeholder="Search a medicine, brand, condition, side effect…" autocomplete="off"
+           aria-label="Search the graph" value="{{ q }}">
+    <div class="results" id="results" role="listbox"></div>
+  </div>
+</header>
+
+<main>
+  <aside>
+    <div id="riskSide" hidden>
+      <h2>Warnings, most serious first</h2>
+      <p class="hint" id="riskSummary"></p>
+      <div class="row"><button class="btn" id="showAll" type="button">Show all warnings</button></div>
+      <div class="findings" id="findingList"></div>
+    </div>
+    <div id="exploreSide">
+      <h2>Show relationships</h2>
+      <div id="types"></div>
+      <h2>Per type, show up to</h2>
+      <select id="limit" aria-label="Neighbours per relationship type">
+        <option>10</option><option selected>25</option><option>50</option><option>100</option>
+      </select>
+    </div>
+    <h2>Node types</h2>
+    <div id="legend"></div>
+    <div class="row" style="margin-top:14px"><button class="btn" id="fit" type="button">Fit to screen</button>
+      <button class="btn" id="clear" type="button">Clear</button></div>
+    <p class="hint">Click a node to see everything about it. Double-click, or use “Expand” in the panel, to add its
+      neighbours. Drag to move, scroll to zoom.</p>
+  </aside>
+
+  <div id="stage">
+    <div id="cy"></div>
+    <div id="sg"></div>
+    <div class="empty" id="empty"><p>Search above for any medicine, brand, condition or side effect to start
+      exploring, or open <b>Drug network</b> to see every serious interaction at once.</p></div>
+    <div class="status" id="status" hidden></div>
+  </div>
+
+  <aside class="details" id="details" aria-live="polite">
+    <p class="hint">Nothing selected.</p>
+  </aside>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/graphology@0.25.4/dist/graphology.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/graphology-library@0.8.0/dist/graphology-library.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sigma@3.0.1/dist/sigma.min.js"></script>
+<script>
+"use strict";
+// Every value from the data is inserted with textContent (never innerHTML): label texts come from outside sources.
+const LABELS = ["Drug", "Brand", "Condition", "SideEffect", "Enzyme", "Label", "Ban", "Guideline", "Class"];
+const TYPES = {
+  CONTAINS: "Brand contains drug", INTERACTS_WITH: "Drug interacts with drug", INHIBITS: "Blocks liver enzyme",
+  INDUCES: "Speeds up liver enzyme", METABOLISED_BY: "Cleared by liver enzyme", TREATS: "Treats condition",
+  CONTRAINDICATED_IN: "Unsafe with condition", CAUSES: "Causes side effect", HAS_LABEL: "Official US label",
+  LABEL_MENTIONS: "Label warns about drug", REPORTED_TOGETHER: "Side effects reported together",
+  BANNED_UNDER: "Banned in India", SUBSTITUTE: "Same-ingredient substitute", FLAGGED_BY: "Beers criterion (65+)",
+};
+// links the risk graph works out rather than reads from the database
+const DERIVED_TYPES = { IN_CLASS: "Same type of medicine (drug class)",
+                        SAME_PROBLEM: "The side effect is what the other medicine treats" };
+const TYPE_COLOR = { CONTRAINDICATED_IN: "--Condition", TREATS: "--Condition", INHIBITS: "--Enzyme", INDUCES: "--Enzyme",
+  METABOLISED_BY: "--Enzyme", FLAGGED_BY: "--Guideline", BANNED_UNDER: "--Ban", CAUSES: "--SideEffect", IN_CLASS: "--Class",
+  SAME_PROBLEM: "--muted", CONTAINS: "--muted" };
+const ON_BY_DEFAULT = ["CONTAINS", "INTERACTS_WITH", "INHIBITS", "INDUCES", "METABOLISED_BY", "HAS_LABEL", "BANNED_UNDER",
+                       "FLAGGED_BY", "CONTRAINDICATED_IN"];
+const $ = id => document.getElementById(id);
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+function el(tag, props = {}, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "style") Object.assign(e.style, v);
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v);
+  }
+  for (const c of children.flat()) if (c != null) e.append(c.nodeType ? c : String(c));
+  return e;
+}
+async function api(path, params = {}) {
+  const res = await fetch(path + "?" + new URLSearchParams(params));
+  if (!res.ok) throw new Error(res.status === 404 ? "Not found (the database may have been rebuilt)" : "Request failed");
+  return res.json();
+}
+function status(text) { const s = $("status"); s.hidden = !text; s.textContent = text || ""; }
+
+// ------------------------------------------------------------------ side controls
+for (const [type, text] of Object.entries(TYPES)) {
+  const box = el("input", { type: "checkbox", value: type });
+  box.checked = ON_BY_DEFAULT.includes(type);
+  box.addEventListener("change", applyTypeFilter);
+  $("types").append(el("label", { class: "check", title: type }, box, el("span", { class: "line", "data-type": type }), text));
+}
+for (const label of LABELS)
+  $("legend").append(el("div", { class: "check" }, el("span", { class: "swatch", style: { background: css("--" + label) } }), label));
+const chosenTypes = () => [...$("types").querySelectorAll("input:checked")].map(i => i.value);
+
+// ------------------------------------------------------------------ explore view (Cytoscape)
+const edgeColor = e => {
+  const sev = e.data("props").severity;
+  return sev === "Major" ? css("--major") : sev === "Moderate" ? css("--moderate") :
+         css(TYPE_COLOR[e.data("type")] || "--minor");
+};
+const cy = cytoscape({
+  container: $("cy"), wheelSensitivity: 0.25, minZoom: 0.05, maxZoom: 4,
+  style: [
+    { selector: "node", style: {
+        "background-color": n => css("--" + n.data("label")) || css("--muted"), "label": "data(short)",
+        "color": css("--text"), "font-size": 10, "text-valign": "bottom", "text-margin-y": 4, "width": 18, "height": 18,
+        "text-wrap": "ellipsis", "text-max-width": 120, "text-background-color": css("--bg"), "text-background-opacity": 0.7,
+        "text-background-padding": 1 } },
+    { selector: "node:selected", style: { "border-width": 3, "border-color": css("--accent"), "width": 24, "height": 24 } },
+    { selector: "node.focus", style: { "width": 26, "height": 26, "font-weight": "bold" } },
+    { selector: "edge", style: {
+        "width": e => e.data("props").severity === "Major" ? 2.5 : 1.4, "line-color": edgeColor,
+        "target-arrow-color": edgeColor, "target-arrow-shape": "triangle", "arrow-scale": 0.7, "curve-style": "bezier",
+        "opacity": 0.8 } },
+    { selector: "edge[type = 'LABEL_MENTIONS'], edge[type = 'REPORTED_TOGETHER'], edge[type = 'SUBSTITUTE'], edge[type = 'FLAGGED_BY']",
+      style: { "line-style": "dashed" } },
+    { selector: "edge[?derived]", style: { "line-style": "dotted", "target-arrow-shape": "none" } },
+    { selector: "edge[type = 'INTERACTS_WITH']", style: { "target-arrow-shape": "none" } },
+    { selector: "edge[type = 'CONTAINS']", style: { "width": 1, "opacity": 0.5 } },
+    { selector: "node[?derived]", style: { "background-opacity": 0.15, "border-width": 2, "border-style": "dashed",
+        "border-color": css("--Class") } },
+    { selector: "node.context, edge.context", style: { "opacity": 0.4 } },
+    { selector: "edge:selected", style: { "width": 4, "line-color": css("--accent"), "target-arrow-color": css("--accent") } },
+    { selector: ".hidden", style: { "display": "none" } },
+  ],
+});
+function short(name) { return name.length > 32 ? name.slice(0, 30) + "…" : name; }
+function addData({ nodes = [], edges = [] }) {
+  const added = [];
+  for (const n of nodes) if (!cy.getElementById(n.id).length)
+    added.push(cy.add({ group: "nodes", data: { ...n, short: short(n.name) } }));
+  for (const e of edges) if (!cy.getElementById(e.id).length && cy.getElementById(e.source).length && cy.getElementById(e.target).length)
+    added.push(cy.add({ group: "edges", data: e }));
+  $("empty").hidden = cy.nodes().length > 0;
+  applyTypeFilter();
+  return cy.collection(added);
+}
+function layout(around) {
+  // a fresh graph starts from random positions; an expansion keeps what is already placed
+  const opts = { name: "cose", animate: true, animationDuration: 500, randomize: !around, nodeRepulsion: 40000,
+                 idealEdgeLength: 150, nodeOverlap: 40, fit: !around, padding: 40 };
+  cy.layout(opts).run();
+  if (around) setTimeout(() => cy.animate({ center: { eles: around }, duration: 300 }), 520);
+}
+function applyTypeFilter() {
+  if (mode !== "explore") return;                            // the filters belong to the Explore view
+  const shown = new Set(chosenTypes());
+  cy.edges().forEach(e => e.toggleClass("hidden", !shown.has(e.data("type"))));
+}
+async function expand(id, types) {
+  status("Loading neighbours…");
+  try {
+    const data = await api("/api/graph/expand", { id, types: (types || chosenTypes()).join(","), limit: $("limit").value });
+    const added = addData(data);
+    const node = cy.getElementById(id);
+    const parts = Object.entries(data.totals).map(([t, n]) => `${t}: ${Math.min(n, $("limit").value)} of ${n}`);
+    status(added.length ? parts.join(" · ") : "No new neighbours for the chosen relationship types");
+    const src = node.position();
+    added.nodes().forEach((n, i) => {                          // start new nodes in a ring around the parent
+      const a = (2 * Math.PI * i) / Math.max(added.nodes().length, 1);
+      n.position({ x: src.x + 160 * Math.cos(a), y: src.y + 160 * Math.sin(a) });
+    });
+    layout(node);
+  } catch (err) { status(err.message); }
+}
+async function openNode(item, { expandIt = true } = {}) {
+  showMode("explore");
+  addData({ nodes: [item] });
+  const node = cy.getElementById(item.id);
+  cy.nodes().removeClass("focus"); node.addClass("focus");
+  cy.$(":selected").unselect(); node.select();
+  await showNode(item.id);
+  if (expandIt) await expand(item.id);
+  else cy.animate({ center: { eles: node }, zoom: 1.2, duration: 300 });
+}
+cy.on("tap", "node", e => mode === "risk" ? showRiskNode(e.target.data()) : showNode(e.target.id()));
+cy.on("dbltap", "node", e => { if (mode === "explore") expand(e.target.id()); });
+cy.on("tap", "edge", e => mode === "risk" ? showRiskEdge(e.target.data()) : showEdge(e.target.data()));
+
+// ------------------------------------------------------------------ details panel
+function value(v) {
+  if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  return v === null || v === "" ? "—" : String(v);
+}
+function props(obj) {
+  const dl = el("dl", { class: "kv" });
+  for (const [k, v] of Object.entries(obj)) {
+    const text = value(v);
+    if (k === "class_notes" || k === "name_lower") continue;
+    dl.append(el("dt", {}, k.replace(/_/g, " ")),
+              el("dd", {}, text.length > 160 ? el("div", { class: "long" }, text) : text));
+  }
+  return dl;
+}
+async function showNode(id, { before = [] } = {}) {
+  // before: elements shown above the node's details (the Risks view lists the warnings it is part of there)
+  const box = $("details"), explorable = mode === "explore";
+  box.replaceChildren(el("p", { class: "hint" }, "Loading…"));
+  try {
+    const n = await api("/api/graph/node", { id });
+    const degree = el("table", { class: "degree" },
+      n.degree.map(d => el("tr", {}, el("td", {}, TYPES[d.type] || d.type, el("div", { class: "hint" }, d.type)),
+        el("td", {}, d.count.toLocaleString(), " ", explorable ?
+           el("button", { class: "btn", type: "button", onclick: () => expand(id, [d.type]) }, "Expand") : null))));
+    const actions = explorable ? el("div", { class: "row" },
+        el("button", { class: "btn primary", type: "button", onclick: () => expand(id) }, "Expand shown types"),
+        el("button", { class: "btn", type: "button", onclick: () => { cy.getElementById(id).remove();
+          $("empty").hidden = cy.nodes().length > 0; box.replaceChildren(el("p", { class: "hint" }, "Removed.")); } },
+          "Remove"))
+      : el("div", { class: "row" }, el("button", { class: "btn", type: "button",
+          onclick: () => openNode({ id, label: n.label, name: n.name, props: n.props }) }, "Explore its connections"));
+    box.replaceChildren(
+      el("div", { class: "pill" }, el("span", { class: "swatch", style: { background: css("--" + n.label) } }), n.label),
+      el("h3", { style: { margin: "8px 0 4px", fontSize: "17px", overflowWrap: "anywhere" } }, n.name),
+      actions, ...before, el("h2", {}, "Connections in the database"), degree, el("h2", {}, "Details"), props(n.props));
+  } catch (err) { box.replaceChildren(el("p", { class: "hint" }, err.message)); }
+}
+function showEdge(e) {
+  const name = id => cy.getElementById(id).data("name") || "?";
+  $("details").replaceChildren(
+    el("div", { class: "pill" }, e.type),
+    el("h3", { style: { margin: "8px 0 4px", fontSize: "16px" } }, `${name(e.source)} → ${name(e.target)}`),
+    el("p", { class: "hint" }, TYPES[e.type] || ""),
+    Object.keys(e.props).length ? props(e.props) : el("p", { class: "hint" }, "No further details on this relationship."));
+}
+
+// ------------------------------------------------------------------ risk view: the warnings of a medicine list
+let risk = null, riskPositions = null, focused = null;
+const KIND_SHORT = f => f.kind === "Possible prescribing cascade" ? "cascade" : f.weight;
+function riskElements() {
+  return [...risk.nodes.map(n => ({ group: "nodes", data: { ...n, props: {}, short: short(n.name) } })),
+          ...risk.edges.map(e => ({ group: "edges", data: e }))];
+}
+function ringLayout(animate) {
+  // ingredients in the middle, how they connect (enzymes, classes, side effects) around them, the rest outside
+  const ring = { Drug: 3, Enzyme: 2, Class: 2, SideEffect: 2 };
+  cy.layout({ name: "concentric", concentric: n => ring[n.data("label")] || 1, levelWidth: () => 1,
+              minNodeSpacing: 55, padding: 40, animate, animationDuration: 400 }).run();
+}
+async function loadRisk() {
+  status("Checking the medicines…");
+  risk = await api("/api/graph/risk", { medicines: START.medicines, conditions: START.conditions, age: START.age });
+  if (!risk.nodes.length) { status("None of these medicines were recognised."); return; }
+  const serious = risk.findings.filter(f => f.weight > 0).length;
+  $("riskSummary").textContent = `${risk.level.level}: ${serious} warning${serious === 1 ? "" : "s"}` +
+    (risk.findings.length > serious ? `, ${risk.findings.length - serious} possible cascade(s)` : "") +
+    ". Click one to see only its path.";
+  $("findingList").replaceChildren(...risk.findings.map(f => el("button", { type: "button", "data-index": f.index,
+      onclick: () => focusFinding(f.index) },
+    el("span", { class: `points w${f.weight}` }, KIND_SHORT(f)), el("span", {}, f.title))));
+  const wanted = risk.findings.find(f => f.title === START.finding);
+  showRiskGraph(!wanted);               // opening on one warning: place the whole graph at once, animate only the path
+  if (wanted) focusFinding(wanted.index);
+  else status("Every warning in the list, and only those. Click a warning, a line or a dot for the details.");
+}
+function showRiskGraph(animate = true) {
+  cy.elements().remove();
+  cy.add(riskElements());
+  $("empty").hidden = true;
+  if (riskPositions) cy.nodes().positions(n => riskPositions[n.id()] || n.position());
+  else if (!animate) { ringLayout(false); riskPositions = savePositions(); }
+  else { ringLayout(true); setTimeout(() => { riskPositions = savePositions(); }, 450); }
+}
+function savePositions() { return Object.fromEntries(cy.nodes().map(n => [n.id(), { ...n.position() }])); }
+function focusFinding(i) {
+  // #2: only the path behind one warning, with the brands that contain its drugs shown faintly for context
+  const f = risk.findings[i];
+  focused = i;
+  if (!riskPositions) riskPositions = savePositions();
+  const keep = new Set([...f.nodes, ...f.edges]), context = new Set();
+  cy.edges("[type = 'CONTAINS']").forEach(e => {
+    if (keep.has(e.target().id()) && !keep.has(e.id())) { context.add(e.id()); context.add(e.source().id()); }
+  });
+  cy.elements().forEach(x => {
+    x.toggleClass("hidden", !keep.has(x.id()) && !context.has(x.id()));
+    x.toggleClass("context", context.has(x.id()) && !keep.has(x.id()));
+  });
+  // a path reads best as a small tree: the drugs on top, what links them (enzyme, rule, condition) below
+  const shown = cy.elements().not(".hidden");
+  shown.layout({ name: "breadthfirst", roots: shown.nodes("[label = 'Drug']"), spacingFactor: 1.6, padding: 70,
+                 fit: true, animate: true, animationDuration: 400 }).run();
+  document.querySelectorAll("#findingList button").forEach(b => b.setAttribute("aria-current", +b.dataset.index === i));
+  status(`Showing one warning's path. “Show all warnings” brings back the whole list.`);
+  showFinding(i);
+}
+function showAllFindings() {
+  focused = null;
+  cy.elements().removeClass("hidden context");
+  if (riskPositions) cy.nodes().positions(n => riskPositions[n.id()] || n.position());
+  cy.animate({ fit: { padding: 40 }, duration: 300 });
+  document.querySelectorAll("#findingList button").forEach(b => b.setAttribute("aria-current", "false"));
+  status("Every warning in the list, and only those.");
+}
+function findingButtons(indices) {
+  return el("div", { class: "findings" }, indices.map(i => risk.findings[i]).map(f =>
+    el("button", { type: "button", onclick: () => focusFinding(f.index) },
+       el("span", { class: `points w${f.weight}` }, KIND_SHORT(f)), el("span", {}, f.title))));
+}
+function showFinding(i) {
+  const f = risk.findings[i];
+  const parts = [
+    el("div", { class: "pill" }, f.kind), el("span", { class: `points w${f.weight}`, style: { marginLeft: "8px" } },
+      f.weight ? `${f.weight} point${f.weight === 1 ? "" : "s"}` : "not scored"),
+    el("h3", { style: { margin: "8px 0 4px", fontSize: "16px", overflowWrap: "anywhere" } }, f.title),
+    el("p", {}, f.meaning),
+    ...f.effects.map(g => el("div", { class: "box" }, el("b", {}, g.title), el("p", {}, g.what),
+      el("p", {}, el("span", { class: "hint" }, "Watch for: "), g.watch))),
+    ...f.beers.map(b => el("div", { class: "box" }, el("b", {}, "Older adults (65+)"), el("p", {}, b))),
+    ...f.label.map(q => el("blockquote", {}, el("p", {}, `“${q.text}”`), el("cite", {}, `From the official US label of ${q.drug} · `,
+      el("a", { href: q.url, target: "_blank", rel: "noopener" }, "read the label")))),
+  ];
+  if (f.reported.length) parts.push(el("p", { class: "hint", style: { marginTop: "10px" } },
+    "Reported by people taking both (FDA reports): " + f.reported.map(e => `${e.effect.toLowerCase()} (${e.reports})`).join(", ")));
+  parts.push(el("h2", {}, "Graph path"), el("div", { class: "long" }, f.path),
+             el("div", { class: "row" }, el("button", { class: "btn", type: "button", onclick: showAllFindings }, "Show all warnings")));
+  $("details").replaceChildren(...parts);
+}
+function partOf(indices) {
+  return indices.length ? [el("h2", {}, `Part of ${indices.length} warning${indices.length === 1 ? "" : "s"}`), findingButtons(indices)]
+                        : [el("p", { class: "hint" }, "In the list, but not part of any warning.")];
+}
+function showRiskNode(n) {
+  if (n.eid) return showNode(n.eid, { before: partOf(n.findings) });
+  $("details").replaceChildren(el("div", { class: "pill" }, n.label), el("h3", { style: { margin: "8px 0 4px" } }, n.name),
+    el("p", { class: "hint" }, "Worked out by the app from the drug classes, not a node stored in the database."),
+    ...partOf(n.findings));
+}
+function showRiskEdge(e) {
+  const name = id => cy.getElementById(id).data("name") || "?";
+  $("details").replaceChildren(...[el("div", { class: "pill" }, e.type),
+    el("h3", { style: { margin: "8px 0 4px", fontSize: "16px" } }, `${name(e.source)} → ${name(e.target)}`),
+    el("p", { class: "hint" }, TYPES[e.type] || DERIVED_TYPES[e.type] || ""),
+    e.derived ? el("p", { class: "hint" }, "Worked out by the app, not stored in the database.") : null,
+    Object.keys(e.props).length ? props(e.props) : null, ...partOf(e.findings)].filter(Boolean));
+}
+$("showAll").addEventListener("click", showAllFindings);
+
+// ------------------------------------------------------------------ search
+let timer;
+$("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(runSearch, 220); });
+$("q").addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); const first = $("results").querySelector("button"); first ? first.click() : runSearch(); }
+  if (e.key === "Escape") $("results").style.display = "none";
+});
+document.addEventListener("click", e => { if (!e.target.closest(".search")) $("results").style.display = "none"; });
+async function runSearch() {
+  const text = $("q").value.trim(), box = $("results");
+  if (text.length < 2) { box.style.display = "none"; return; }
+  const found = await api("/api/graph/search", { q: text });
+  box.replaceChildren(...(found.length ? found.map(item => el("button", { type: "button", role: "option",
+      onclick: () => { box.style.display = "none"; openNode(item); } },
+      el("span", { class: "swatch", style: { background: css("--" + item.label) } }),
+      el("span", {}, item.name), el("span", { class: "hint", style: { marginLeft: "auto" } }, item.label)))
+    : [el("div", { class: "hint", style: { padding: "8px 10px" } }, "No match")]));
+  box.style.display = "block";
+}
+
+// ------------------------------------------------------------------ drug network view (Sigma, WebGL)
+let sigma = null, network = null;
+const GROUPS = { A: "Digestion & metabolism", B: "Blood", C: "Heart & blood vessels", D: "Skin", G: "Urinary & sex hormones",
+  H: "Hormones", J: "Infections", L: "Cancer & immune", M: "Muscles & joints", N: "Nervous system", P: "Parasites",
+  R: "Breathing", S: "Eyes & ears", V: "Other", "?": "Unclassified" };
+const GROUP_COLORS = { A: "#16a34a", B: "#dc2626", C: "#2563eb", D: "#d97706", G: "#db2777", H: "#7c3aed", J: "#0891b2",
+  L: "#9333ea", M: "#ca8a04", N: "#4f46e5", P: "#65a30d", R: "#0d9488", S: "#e11d48", V: "#64748b", "?": "#94a3b8" };
+async function showNetwork() {
+  if (sigma) return;
+  status("Loading every drug with a Major interaction…");
+  const data = await api("/api/graph/network", { severity: "Major" });
+  const g = new graphology.Graph({ type: "undirected", multi: false });
+  const maxRisk = Math.max(...data.nodes.map(n => n.risk), 1);
+  data.nodes.forEach((n, i) => g.addNode(i, { label: n.name, id: n.id, group: n.group,
+    x: Math.cos(i) * 100 * Math.random(), y: Math.sin(i) * 100 * Math.random(),
+    size: 2 + 10 * Math.sqrt(n.risk / maxRisk), color: GROUP_COLORS[n.group] || GROUP_COLORS["?"] }));
+  data.edges.forEach(([a, b]) => { if (a !== b && !g.hasEdge(a, b)) g.addEdge(a, b, { color: "rgba(150,150,150,0.12)", size: 0.5 }); });
+  status(`${data.nodes.length.toLocaleString()} drugs, ${g.size.toLocaleString()} Major interactions. Arranging…`);
+  const fa2 = graphologyLibrary.layoutForceAtlas2;
+  const settings = { ...fa2.inferSettings(g), barnesHutOptimize: true, gravity: 1, scalingRatio: 8, slowDown: 5 };
+  const worker = new graphologyLibrary.FA2Layout(g, { settings });
+  worker.start();
+  setTimeout(() => { worker.stop(); status(`${data.nodes.length.toLocaleString()} drugs, ${g.size.toLocaleString()} Major interactions. Hover to highlight, click for details.`); }, 6000);
+  let hovered = null;
+  sigma = new Sigma(g, $("sg"), {
+    labelColor: { color: css("--text") }, labelRenderedSizeThreshold: 9, defaultEdgeColor: "#999",
+    nodeReducer: (node, attr) => hovered !== null && node !== hovered && !g.areNeighbors(node, hovered)
+      ? { ...attr, color: "rgba(160,160,160,0.25)", label: "" } : attr,
+    edgeReducer: (edge, attr) => hovered !== null && !g.extremities(edge).includes(hovered)
+      ? { ...attr, hidden: true } : hovered !== null ? { ...attr, color: css("--major"), size: 1 } : attr,
+  });
+  sigma.on("enterNode", ({ node }) => { hovered = node; sigma.refresh(); });
+  sigma.on("leaveNode", () => { hovered = null; sigma.refresh(); });
+  sigma.on("clickNode", ({ node }) => {
+    const a = g.getNodeAttributes(node);
+    showNode(a.id).then(() => $("details").prepend(el("div", { class: "row" },
+      el("button", { class: "btn primary", type: "button", onclick: () =>
+        openNode({ id: a.id, label: "Drug", name: a.label, props: {} }) }, "Open in Explore view"))));
+  });
+  $("legend").append(el("h2", {}, "Drug network colours"),
+    ...Object.entries(GROUPS).map(([k, v]) => el("div", { class: "check" },
+      el("span", { class: "swatch", style: { background: GROUP_COLORS[k] } }), v)));
+}
+
+// ------------------------------------------------------------------ schema view
+async function showSchema() {
+  const s = await api("/api/graph/schema");
+  cy.elements().remove();
+  cy.add(s.labels.map(l => ({ group: "nodes", data: { id: "L:" + l.label, label: l.label, name: l.label,
+    short: `${l.label} (${l.count.toLocaleString()})`, props: { count: l.count } } })));
+  cy.add(s.relationships.map((r, i) => ({ group: "edges", data: { id: "R:" + i, type: r.type, source: "L:" + r.from,
+    target: "L:" + r.to, props: { relationship: r.type, meaning: TYPES[r.type] || "", count: r.count } } })));
+  cy.edges().style({ "label": e => `${e.data("type")} ${e.data("props").count.toLocaleString()}`, "font-size": 8,
+    "color": css("--muted"), "text-rotation": "autorotate", "loop-direction": "-45deg", "loop-sweep": "-60deg" });
+  $("empty").hidden = true;
+  cy.layout({ name: "circle", padding: 60, animate: false }).run();
+  status("The shape of the whole graph: node types with their counts, relationship types with theirs.");
+  $("details").replaceChildren(el("h3", { style: { marginTop: 0 } }, "Schema"),
+    el("p", { class: "hint" }, "Every node type and relationship type in the database, with counts. Switch back to Explore to browse actual data."));
+}
+
+// ------------------------------------------------------------------ switching views
+let mode = "explore", saved = null;
+function showMode(next) {
+  if (next === mode) return;
+  if (mode === "explore") saved = cy.elements().jsons();                 // keep the exploration when leaving
+  if (mode === "risk" && focused === null) riskPositions = savePositions();
+  if (mode === "schema") cy.elements().remove();
+  mode = next;
+  document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-pressed", b.dataset.mode === next));
+  $("cy").style.display = next === "network" ? "none" : "block";
+  $("sg").style.display = next === "network" ? "block" : "none";
+  $("riskSide").hidden = next !== "risk";
+  $("exploreSide").hidden = next !== "explore";
+  status("");
+  if (next === "risk") {
+    if (!START.medicines.trim()) {
+      cy.elements().remove(); $("empty").hidden = false;
+      $("details").replaceChildren(el("p", {}, "The Risks view draws the warnings of a medicine list. Check a list on the ",
+        el("a", { href: "/" }, "medicine check page"), " first, then use “see them as a graph”."));
+    } else if (!risk) loadRisk().catch(err => status(err.message));
+    else { showRiskGraph(); if (focused !== null) focusFinding(focused); }
+  } else if (next === "explore") {
+    cy.elements().remove(); if (saved) cy.add(saved); cy.edges().removeStyle();
+    $("empty").hidden = cy.nodes().length > 0; applyTypeFilter();
+  } else if (next === "network") { $("empty").hidden = true; showNetwork().catch(err => status(err.message)); }
+  else showSchema().catch(err => status(err.message));
+}
+document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => showMode(b.dataset.mode)));
+$("fit").addEventListener("click", () => mode === "network" ? sigma && sigma.getCamera().animatedReset() : cy.animate({ fit: { padding: 40 } }));
+$("clear").addEventListener("click", () => { if (mode === "explore") { cy.elements().remove(); saved = null;
+  $("empty").hidden = false; status(""); $("details").replaceChildren(el("p", { class: "hint" }, "Nothing selected.")); } });
+
+// ------------------------------------------------------------------ start: a checked medicine list, or a search
+const START = { medicines: {{ medicines | tojson }}, conditions: {{ conditions | tojson }}, age: {{ age | tojson }},
+                finding: {{ finding | tojson }} };
+if (START.medicines.trim()) showMode("risk");
+else if ($("q").value.trim()) runSearch();
+</script>
+</body>
+</html>

@@ -53,6 +53,12 @@ Start the web page, then open http://localhost:5050
 .venv/bin/python src/app.py
 ```
 
+The **Graph explorer** is at http://localhost:5050/graph. After a check, "see them as a graph" opens the
+**Risks** view: the medicine list with only the connections that produced its warnings (nothing else), and
+"show path" next to a warning opens just that warning's path. **Explore** browses any node and its neighbours;
+**Schema** shows the node and relationship types. The page loads its drawing libraries (Cytoscape.js, Sigma.js)
+from the jsDelivr CDN, so it needs an internet connection.
+
 Stop the web page with Ctrl+C. Stop Neo4j with `docker stop medicine-neo4j`.
 
 ## Rebuild the database from the raw data
@@ -104,7 +110,7 @@ is worse than a missing one.
 ## Check nothing broke
 
 Run after any change to the data, the queries or `src/curated.py` (about 5 seconds, read-only, needs Neo4j running).
-It prints PASS/FAIL for 90 checks and ends with a count:
+It prints PASS/FAIL for 98 checks and ends with a count:
 
 ```bash
 .venv/bin/python tests/run_regression.py
@@ -123,7 +129,8 @@ It prints PASS/FAIL for 90 checks and ends with a count:
 | `src/curated.py` | Small hand-made lists: everyday condition words, prescribing cascades, effect groups ("what can happen"), how labels name drug groups, serious reported events |
 | `src/load_graph.py` | Loads the graph into Neo4j and ranks drugs with Graph Data Science (degree centrality) |
 | `src/queries.py` | The six features as Cypher queries |
-| `src/app.py`, `templates/index.html` | The Flask web page |
+| `src/app.py`, `templates/index.html` | The Flask web page (medicine check) |
+| `src/explore.py`, `templates/graph.html` | The graph explorer (/graph): the risk graph of a checked list, one warning's path, browsing, schema |
 | `.env` | Your Neo4j password (never committed) |
 
 ## Graph model

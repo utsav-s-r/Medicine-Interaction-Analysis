@@ -52,6 +52,7 @@
 <body>
 <main>
   <h1>Medication Risk Check</h1>
+  <p style="margin:0 0 6px"><a href="/graph">Graph explorer →</a></p>
   <p class="sub">Checks a patient's whole medicine list against each other, their conditions and hidden duplicates, using a Neo4j graph.
      Educational prototype, not a clinical tool.</p>
 
@@ -90,6 +91,9 @@
   {% macro effects(list, css) %}{% for g in list %}<div class="effect {{ css }}"><b>{{ g.title }}</b>
     <p>{{ g.what }}</p><p><span class="hint">Watch for:</span> {{ g.watch }}</p></div>{% endfor %}{% endmacro %}
 
+  {% macro graph_url(finding='') %}/graph?{{ {'medicines': medicines, 'conditions': conditions,
+      'age': age if age is not none else '', 'finding': finding} | urlencode }}{% endmacro %}
+
   {% if result %}
   {% if result.unknown %}<div class="card"><h2 class="warn">Not recognised</h2>
     {% for u in result.unknown %}<p style="margin:6px 0"><b>{{ u.text }}</b>
@@ -105,7 +109,7 @@
         <div>{{ result.level.why }}</div>
         <div class="hint">Total score {{ result.score }} from {{ result.findings | length }} findings (serious = 3, moderate = 2, minor = 1 point each).
           The level follows the worst finding; the score is for comparing lists.</div></div>
-      <div><div class="hint">Recognised as</div>
+      <div><div class="hint">Recognised as · <a href="{{ graph_url() }}">see them as a graph →</a></div>
         {% for m in result.medicines %}<div>{% if m.input | lower != m.label | lower %}<span class="hint">{{ m.input }} →</span> {% endif %}<b>{{ m.label }}</b>{% if m.kind == 'brand' %}: {{ m.drugs | map(attribute='name') | join(', ') }}{% endif %}{% if m.incomplete %}<br><span class="warn">Composition may be incomplete: the name lists more strengths than the data has ingredients. Check the pack and add the missing ingredient as its own line.</span>{% endif %}</div>{% endfor %}
         {% for c in result.conditions %}<span class="pill" title="{{ c.members | join(', ') }}">{% if c.input | lower != c.name | lower %}{{ c.input }} → {% endif %}{{ c.name }}{% if c.members | length > 1 %} (+{{ c.members | length - 1 }} related){% endif %}</span>{% endfor %}</div>
     </div>
@@ -159,7 +163,7 @@
             <p class="meaning">{{ f.meaning }}</p>
             {{ effects(f.effects, 'w' ~ f.weight) }}
             {{ evidence(f) }}
-            <code>{{ f.path }}</code></td></tr>
+            <code>{{ f.path }}</code> <a class="hint" href="{{ graph_url(f.title) }}">show path →</a></td></tr>
     {% endfor %}</table>
     <p class="hint" style="margin-top:10px">Where the answers come from: how serious a pair is comes from DDInter.
       Quotes come from the official US drug labels (openFDA). "Reported by people taking both" counts reports to the
@@ -178,7 +182,8 @@
   {% if result.cascades %}
   <div class="card"><h2>Possible prescribing cascades (for review, not scored)</h2>
     <p class="hint">A medicine may have been prescribed to treat a side effect of another one in the list.</p>
-    <ul>{% for f in result.cascades %}<li>{{ f.title }}<p class="meaning hint">{{ f.meaning }}</p><code>{{ f.path }}</code></li>{% endfor %}</ul>
+    <ul>{% for f in result.cascades %}<li>{{ f.title }}<p class="meaning hint">{{ f.meaning }}</p><code>{{ f.path }}</code>
+      <a class="hint" href="{{ graph_url(f.title) }}">show path →</a></li>{% endfor %}</ul>
   </div>
   {% endif %}
 

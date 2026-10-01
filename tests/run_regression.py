@@ -246,6 +246,36 @@ def main():
           any("sodium" in c["title"] for c in at(78, ["tramadol"])["cautions"]) and at(78, ["tramadol"])["score"] == 0)
     check("lithium is not counted as an antipsychotic",
           not any("lithium" in t for t in beers(at(78, ["lithium carbonate"]))))
+    print("--- risk graph (/graph Risks view)")
+    import explore  # noqa: E402
+    r = queries.analyse(d, ["warfarin", "Brufen 400", "clarithromycin", "simvastatin", "Scofix AZ 200mg/250mg Tablet",
+                            "Dolo 650", "Calpol 500", "amlodipine", "furosemide"], ["kidney"], None, 78)
+    g = explore.risk_graph(d, r)
+    noise = {"LABEL_MENTIONS", "REPORTED_TOGETHER", "SUBSTITUTE", "HAS_LABEL"} & {e["type"] for e in g["edges"]}
+    check("the risk graph holds no noise relationships (reports, label mentions, substitutes)", not noise, noise)
+    check("every warning has a path in the graph", all(f["edges"] for f in g["findings"]),
+          [f["title"] for f in g["findings"] if not f["edges"]])
+    check("every edge and every non-medicine node belongs to a warning",
+          all(e["findings"] or e["type"] == "CONTAINS" for e in g["edges"])
+          and all(n["findings"] or n["label"] in ("Drug", "Brand") for n in g["nodes"]))
+    by_title = {f["title"]: f for f in g["findings"]}
+    ban = next(f for f in g["findings"] if f["kind"] == "Banned in India")
+    check("the banned brand's path reaches its CDSCO notification",
+          any(n.startswith("Ban:") for n in ban["nodes"]), ban["nodes"])
+    beers = [f for f in g["findings"] if "over 65" in f["kind"]]
+    check("Beers warnings reach their guideline", beers and all(any(n.startswith("Guideline:") for n in f["nodes"])
+                                                               for f in beers))
+    pair = by_title.get("ibuprofen + warfarin: Major interaction")
+    edge = next((e for e in g["edges"] if pair and e["id"] in pair["edges"]), None)
+    check("an interaction is one INTERACTS_WITH edge carrying its severity",
+          edge and edge["type"] == "INTERACTS_WITH" and edge["props"].get("severity") == "Major", edge)
+    check("real nodes carry their database id so their details can load",
+          all(n.get("eid") for n in g["nodes"] if not n["derived"]))
+    # ticlopidine blocks CYP2C19, which clears voriconazole, and DDInter has no direct record of the pair
+    enzyme = [f for f in explore.risk_graph(d, queries.analyse(d, ["ticlopidine", "voriconazole"], []))["findings"]
+              if f["kind"] == "Hidden enzyme interaction"]
+    check("a hidden enzyme warning's path goes through the enzyme (ticlopidine -> CYP2C19 <- voriconazole)",
+          enzyme and "Enzyme:CYP2C19" in enzyme[0]["nodes"] and len(enzyme[0]["edges"]) == 2, enzyme)
     top = queries.top_risk_medicines(d, 5)
     check("GDS risk ranking is populated", len(top) == 5 and top[0]["risk_score"] > 1000, top[:2])
     d.close()

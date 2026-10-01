@@ -1,9 +1,11 @@
-"""Small web page: enter a patient's medicines and conditions, see the ranked risks.
+"""Small web page: enter a patient's medicines and conditions, see the ranked risks; and /graph, an interactive
+explorer of the whole graph.
 
 Run:  python src/app.py     then open http://localhost:5050
 """
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, abort, jsonify, render_template, request
 
+import explore
 import queries
 from config import ROOT, get_driver
 
@@ -32,6 +34,57 @@ def index():
         result = queries.analyse(driver, _lines(medicines), _lines(conditions), new_medicine, age)
     return render_template("index.html", medicines=medicines, conditions=conditions, new_medicine=new_medicine,
                            age=age, result=result, top_risk=queries.top_risk_medicines(driver, 10))
+
+
+# ---------------------------------------------------------------- graph explorer (/graph)
+
+def _text(name, limit=200):
+    return (request.args.get(name) or "").strip()[:limit]
+
+
+@app.get("/graph")
+def graph():
+    """medicines/conditions/age: open the risk graph of that list; finding: open on that one warning's path."""
+    return render_template("graph.html", medicines=_text("medicines", 2000), conditions=_text("conditions", 1000),
+                           age=_text("age", 3), finding=_text("finding", 300), q=_text("q", 100))
+
+
+@app.get("/api/graph/schema")
+def graph_schema():
+    return jsonify(explore.schema(driver))
+
+
+@app.get("/api/graph/search")
+def graph_search():
+    return jsonify(explore.search(driver, _text("q", 100)))
+
+
+@app.get("/api/graph/node")
+def graph_node():
+    found = explore.node(driver, _text("id"))
+    return jsonify(found) if found else abort(404)
+
+
+@app.get("/api/graph/expand")
+def graph_expand():
+    types = [t for t in _text("types", 500).split(",") if t] or None
+    limit = _text("limit", 3)
+    return jsonify(explore.expand(driver, _text("id"), types, int(limit) if limit.isdigit() else 25))
+
+
+@app.get("/api/graph/risk")
+def graph_risk():
+    """The risk graph of a medicine list, checked exactly as on the check page (same medicines, conditions, age)."""
+    medicines = _lines(_text("medicines", 2000))[:30]
+    if not medicines:
+        return jsonify({"nodes": [], "edges": [], "findings": []})
+    result = queries.analyse(driver, medicines, _lines(_text("conditions", 1000))[:20], None, _age(_text("age", 3)))
+    return jsonify(explore.risk_graph(driver, result))
+
+
+@app.get("/api/graph/network")
+def graph_network():
+    return jsonify(explore.drug_network(driver, _text("severity", 10) or "Major"))
 
 
 @app.get("/api/suggest")

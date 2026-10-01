@@ -76,7 +76,7 @@ def _exact_medicine(driver, name):
           WITH b, collect(d {.key, .name}) AS drugs ORDER BY b.discontinued, b.source, b.key
           RETURN 'brand' AS kind, b.name AS label, b.key AS brand_key, drugs,
                  coalesce(b.composition_incomplete, false) AS incomplete,
-                 [(b)-[:BANNED_UNDER]->(x:Ban) | x {.combination, .notification, date: toString(x.date), .list}] AS bans
+                 [(b)-[:BANNED_UNDER]->(x:Ban) | x {.key, .combination, .notification, date: toString(x.date), .list}] AS bans
           LIMIT 1
           UNION
           MATCH (d:Drug {name_lower: toLower($t)})
@@ -273,17 +273,19 @@ def _beers(driver, keys, owner, names, conditions, found, add):
         g, a, b = rule["g"], rule["a"], rule["b"]
         meaning = f"{g['reason']} {g['advice']}".strip()
         kind = BEERS_KIND[g["kind"]]
+        flags = lambda *ks: [_link(_node("Drug", k, names[k]), "FLAGGED_BY", _node("Guideline", g["key"], cite(g)))
+                             for k in ks]
         if g["kind"] in ("avoid", "caution"):
             for k in a:
                 title = (f"{names[k]} is not advised for older adults" if g["kind"] == "avoid" and g["points"] >= 2
                          else f"{names[k]} may not suit an older adult: check if this applies" if g["kind"] == "avoid"
                          else f"{names[k]}: {g['title'][0].lower()}{g['title'][1:]}")
-                add(kind, g["points"], title, f"({names[k]})-[FLAGGED_BY]->({cite(g)})", [k], meaning)
+                add(kind, g["points"], title, f"({names[k]})-[FLAGGED_BY]->({cite(g)})", [k], meaning, links=flags(k))
         elif g["kind"] == "condition" and g["condition"] in patient:
             for k in a:
                 if (k, g["condition"].lower()) not in unsafe:
                     add(kind, g["points"], f"{names[k]}: {g['title'].lower()}",
-                        f"({names[k]})-[FLAGGED_BY]->({cite(g)}) <- ({g['condition']})", [k], meaning)
+                        f"({names[k]})-[FLAGGED_BY]->({cite(g)}) <- ({g['condition']})", [k], meaning, links=flags(k))
         elif g["kind"] == "pair":
             for x in a:
                 for y in b:
@@ -292,14 +294,26 @@ def _beers(driver, keys, owner, names, conditions, found, add):
                     existing = pairs.get(frozenset((x, y)))
                     if existing:
                         existing.setdefault("beers", []).append(f"{cite(g)}. {g['advice']}")
+                        existing["links"] += flags(x, y)
                     else:
                         add(kind, g["points"], f"{names[x]} + {names[y]}: {g['title'].lower()}",
-                            f"({names[x]})-[FLAGGED_BY]->({cite(g)})<-[FLAGGED_BY]-({names[y]})", [x, y], meaning)
+                            f"({names[x]})-[FLAGGED_BY]->({cite(g)})<-[FLAGGED_BY]-({names[y]})", [x, y], meaning,
+                            links=flags(x, y))
         elif g["kind"] == "count":
             if len({i for k in a for i in owner[k]}) >= g["min_count"]:
                 listed = ", ".join(names[k] for k in a)
                 add(kind, g["points"], f"{g['title']}: {listed}",
-                    f"({listed})-[FLAGGED_BY]->({cite(g)})", sorted(a), meaning)
+                    f"({listed})-[FLAGGED_BY]->({cite(g)})", sorted(a), meaning, links=flags(*sorted(a)))
+
+
+def _node(label, key, name, derived=False):
+    """A node of a finding's path. derived: worked out by the app (a drug class, 'same problem'), not stored."""
+    return {"label": label, "key": key, "name": name, "derived": derived}
+
+
+def _link(source, type_, target, derived=False, **props):
+    """One edge of a finding's path, e.g. _link(drug_a, "INTERACTS_WITH", drug_b, severity="Major")."""
+    return {"source": source, "type": type_, "target": target, "derived": derived, "props": props}
 
 
 def _findings(driver, meds, conditions, age=None):
@@ -314,11 +328,15 @@ def _findings(driver, meds, conditions, age=None):
     profile = _effect_profile(driver, keys)
     found = []
 
-    def add(kind, weight, title, path, drugs, meaning, effects=()):
-        """meaning: what the finding means to a patient; effects: what can happen and what to watch for."""
+    names = {d["key"]: d["name"] for m in meds for d in m["drugs"]}
+    drug = lambda k: _node("Drug", k, names[k])
+
+    def add(kind, weight, title, path, drugs, meaning, effects=(), links=()):
+        """meaning: what the finding means to a patient; effects: what can happen and what to watch for;
+        links: the graph edges that produced it, drawn by the risk graph (/graph)."""
         inputs = sorted({i for k in drugs for i in owner[k]})
         found.append({"kind": kind, "weight": weight, "title": title, "path": path, "inputs": inputs, "drugs": drugs,
-                      "meaning": meaning, "effects": list(effects)})
+                      "meaning": meaning, "effects": list(effects), "links": list(links)})
 
     # 1. Direct drug-drug interactions (DDInter)
     for r in driver.execute_query("""
@@ -329,7 +347,8 @@ def _findings(driver, meds, conditions, age=None):
             continue    # both ingredients of the same combination product: intended by the maker
         add("Drug interaction", SEVERITY_WEIGHT[r["severity"]], f"{r['a']} + {r['b']}: {r['severity']} interaction",
             f"({r['a']})-[INTERACTS_WITH {{{r['severity']}}}]-({r['b']})", [r["ak"], r["bk"]],
-            SEVERITY_MEANING[r["severity"]], _shared_effects(profile, r["ak"], r["bk"]))
+            SEVERITY_MEANING[r["severity"]], _shared_effects(profile, r["ak"], r["bk"]),
+            [_link(drug(r["ak"]), "INTERACTS_WITH", drug(r["bk"]), severity=r["severity"])])
 
     # 2a. Hidden interactions through a shared liver enzyme (only where no direct record exists)
     for r in driver.execute_query("""
@@ -346,17 +365,21 @@ def _findings(driver, meds, conditions, age=None):
         add("Hidden enzyme interaction", ENZYME_WEIGHT[r["strength"]],
             f"{r['a']} {verb} {r['enzyme']}, which clears {r['b']}: {r['b']} {outcome}",
             f"({r['a']})-[{r['effect']} {{{r['strength']}}}]->({r['enzyme']})<-[METABOLISED_BY]-({r['b']})",
-            [r["ak"], r["bk"]], meaning)
+            [r["ak"], r["bk"]], meaning, links=[
+                _link(drug(r["ak"]), r["effect"], _node("Enzyme", r["enzyme"], r["enzyme"]), strength=r["strength"]),
+                _link(drug(r["bk"]), "METABOLISED_BY", _node("Enzyme", r["enzyme"], r["enzyme"]),
+                      sensitivity=r["sensitivity"])])
 
     # 2b. Duplicate ingredients: the same drug inside two different medicines
-    names = {d["key"]: d["name"] for m in meds for d in m["drugs"]}
     for k, idx in owner.items():
         if len(idx) > 1:
             labels = " and ".join(meds[i]["label"] for i in sorted(idx))
             add("Duplicate ingredient", 3, f"{names[k]} is taken twice: in {labels}",
                 f"({labels})-[CONTAINS]->({names[k]})", [k],
                 f"Both medicines contain {names[k]}, so together they double the dose, which can lead to an overdose. "
-                f"Usually only one of them should be taken.")
+                f"Usually only one of them should be taken.",
+                links=[_link(_node("Brand", meds[i]["brand_key"], meds[i]["label"]), "CONTAINS", drug(k))
+                       for i in sorted(idx) if meds[i].get("brand_key")])
 
     # 2c. Two different drugs of the same drug class (ATC level 4) from different medicines
     for r in driver.execute_query("""
@@ -368,7 +391,9 @@ def _findings(driver, meds, conditions, age=None):
         add("Same drug class", 1, f"{r['a']} and {r['b']} are the same type of medicine (class {r['shared'][0]})",
             f"({r['a']})-[class {r['shared'][0]}]-({r['b']})", [r["ak"], r["bk"]],
             "Two medicines that do the same job: their effects and side effects add up, and one is often enough.",
-            _shared_effects(profile, r["ak"], r["bk"]))
+            _shared_effects(profile, r["ak"], r["bk"]),
+            [_link(drug(k), "IN_CLASS", _node("Class", r["shared"][0], f"Drug class {r['shared'][0]}", True), True)
+             for k in (r["ak"], r["bk"])])
 
     # 3. Medicines unsafe for the patient's existing conditions (DrugCentral), one warning per drug and condition
     unsafe = defaultdict(list)
@@ -377,12 +402,13 @@ def _findings(driver, meds, conditions, age=None):
             WHERE d.key IN $k AND c.key IN $c
             RETURN d.key AS dk, d.name AS d, c.key AS ck, c.name AS recorded
             ORDER BY recorded""", k=keys, c=list(condition_of)).records:
-        unsafe[(r["dk"], r["d"], condition_of[r["ck"]])].append(r["recorded"])
+        unsafe[(r["dk"], r["d"], condition_of[r["ck"]])].append((r["ck"], r["recorded"]))
     for (dk, d, condition), recorded in unsafe.items():
         add("Unsafe for patient's condition", 3, f"{d} should not be used with {condition.lower()}",
-            f"({d})-[CONTRAINDICATED_IN]->({' / '.join(recorded[:2])})", [dk],
+            f"({d})-[CONTRAINDICATED_IN]->({' / '.join(name for _, name in recorded[:2])})", [dk],
             f"{d} is recorded as harmful for people with {condition.lower()}: it can make the condition worse "
-            f"or cause complications.")
+            f"or cause complications.",
+            links=[_link(drug(dk), "CONTRAINDICATED_IN", _node("Condition", ck, name)) for ck, name in recorded[:2]])
 
     # 2d. A brand whose combination the Government of India has banned (CDSCO, Section 26A)
     for m in meds:
@@ -391,7 +417,9 @@ def _findings(driver, meds, conditions, age=None):
                 f"({m['label']})-[BANNED_UNDER]->({x['notification']}, {x['date']})", [d["key"] for d in m["drugs"]],
                 f"The Government of India banned the combination {x['combination']} (notification {x['notification']}, "
                 f"{x['date']}) because it has no proven benefit or may be unsafe. Ask the doctor for a replacement "
-                f"and do not buy it again. Stock bought before the ban may still be in shops or at home.")
+                f"and do not buy it again. Stock bought before the ban may still be in shops or at home.",
+                links=[_link(_node("Brand", m["brand_key"], m["label"]), "BANNED_UNDER",
+                             _node("Ban", x["key"], x["notification"]), date=x["date"])])
 
     # 4. Prescribing cascades: A causes a side effect that B (also taken) is used to treat.
     #    Only textbook patterns (curated.CASCADE_RULES), and only when the graph has both edges.
@@ -406,23 +434,28 @@ def _findings(driver, meds, conditions, age=None):
               AND NOT EXISTS { (a)-[:TREATS]->(same:Condition) WHERE same.name =~ rule.treat_re }
             WITH a, b, rule, s, c ORDER BY size(c.name), size(s.name)    // simplest names first in the explanation
             RETURN a.key AS ak, a.name AS a, b.key AS bk, b.name AS b, rule.effect AS effect,
-                   collect(DISTINCT s.name)[0] AS side_effect, collect(DISTINCT c.name)[0] AS treats""",
+                   collect(DISTINCT s {.key, .name})[0] AS side_effect, collect(DISTINCT c {.key, .name})[0] AS treats""",
             k=keys, rules=CASCADE_RULES).records:
         if owner[r["ak"]] & owner[r["bk"]]:
             continue
-        pair = cascades.setdefault((r["ak"], r["bk"]), {"a": r["a"], "b": r["b"], "effects": [], "paths": []})
+        pair = cascades.setdefault((r["ak"], r["bk"]), {"a": r["a"], "b": r["b"], "effects": [], "paths": [], "links": []})
         pair["effects"].append(r["effect"])
-        pair["paths"].append(f"({r['a']})-[CAUSES]->({r['side_effect']}) ~ ({r['treats']})<-[TREATS]-({r['b']})")
+        s, c = r["side_effect"], r["treats"]
+        pair["paths"].append(f"({r['a']})-[CAUSES]->({s['name']}) ~ ({c['name']})<-[TREATS]-({r['b']})")
+        pair["links"].append([_link(drug(r["ak"]), "CAUSES", _node("SideEffect", s["key"], s["name"])),
+                              _link(_node("SideEffect", s["key"], s["name"]), "SAME_PROBLEM",
+                                    _node("Condition", c["key"], c["name"]), True, rule=r["effect"]),
+                              _link(drug(r["bk"]), "TREATS", _node("Condition", c["key"], c["name"]))])
     for (ak, bk), c in sorted(cascades.items(), key=lambda kv: -len(kv[1]["effects"]))[:MAX_CASCADES]:
         add("Possible prescribing cascade", 0,
             f"{c['b']} may only be needed because {c['a']} can cause {' and '.join(c['effects'][:3])}",
             c["paths"][0], [ak, bk],
             f"If {c['b']} was started to treat a side effect of {c['a']}, changing {c['a']} may be better "
-            f"than adding another medicine.")
+            f"than adding another medicine.", links=c["links"][0])
 
     # 6. Older adults: AGS Beers Criteria 2023
     if age is not None and age >= BEERS_AGE:
-        _beers(driver, keys, owner, {d["key"]: d["name"] for m in meds for d in m["drugs"]}, conditions, found, add)
+        _beers(driver, keys, owner, names, conditions, found, add)
 
     # what the official labels and real-world reports say about each flagged pair
     label, reported = _pair_evidence(driver, keys, profile)
