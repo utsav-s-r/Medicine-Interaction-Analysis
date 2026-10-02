@@ -9,7 +9,7 @@ import explore
 import queries
 from config import ROOT, get_driver
 
-app = Flask(__name__, template_folder=str(ROOT / "templates"))
+app = Flask(__name__, template_folder=str(ROOT / "templates"), static_folder=str(ROOT / "static"))
 driver = get_driver()
 
 

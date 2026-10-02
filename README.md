@@ -69,8 +69,8 @@ share of all possible pairs). Open a group to see its classes and the classes th
 the classes and example drug pairs behind it (medicines sold in India first), e.g. Blood → antithrombotics ↔
 anti-inflammatories → warfarin + ibuprofen. **Explore** browses any node and its neighbours; **Schema** shows the
 node and relationship types. Links straight to a view: `/graph?profile=Drug:DC:2847`, `/graph?profile=Enzyme:CYP3A`,
-`/graph?profile=Brand:IN:25739`, `/graph?profile=Condition:C:C0264716`, `/graph?classes=all`, `/graph?classes=B`. The page loads its drawing library (Cytoscape.js) from the jsDelivr CDN,
-so it needs an internet connection.
+`/graph?profile=Brand:IN:25739`, `/graph?profile=Condition:C:C0264716`, `/graph?classes=all`, `/graph?classes=B`. Its drawing library (Cytoscape.js 3.30.2) is kept in `static/`, so the page works
+offline.
 
 Stop the web page with Ctrl+C. Stop Neo4j with `docker stop medicine-neo4j`.
 
@@ -144,7 +144,9 @@ It prints PASS/FAIL for 138 checks and ends with a count:
 | `src/queries.py` | The six features as Cypher queries |
 | `src/app.py`, `templates/index.html` | The Flask web page (medicine check) |
 | `src/explore.py`, `templates/graph.html` | The graph explorer (/graph): the risk graph of a checked list, one warning's path, drug profiles, enzyme hubs, brand and condition views, the drug-class map, browsing, schema |
+| `static/cytoscape.min.js` | Cytoscape.js 3.30.2, the graph drawing library (MIT licence), kept locally so /graph works offline |
 | `.env` | Your Neo4j password (never committed) |
+| `NOTICE.md` | Licence and credit for each data source |
 
 ## Graph model
 
@@ -173,5 +175,7 @@ TWOSIDES (Tatonetti lab:
 side effects reported for drug pairs in the US FDA adverse event reports), CDSCO lists of fixed-dose combinations
 banned under Section 26A of the Drugs & Cosmetics Act (2018 onwards, as in force), and the American Geriatrics
 Society 2023 Beers Criteria® (Tables 2-5 and 7, paraphrased; applied when the patient's age is 65 or over).
+
+Each source keeps its own licence; see [NOTICE.md](NOTICE.md). DDInter and SIDER allow non-commercial use only.
 
 Educational prototype, not a certified clinical tool.
